@@ -333,13 +333,15 @@ class CpuProbe(Probe):
                 str(core_count) if core_count else NOT_AVAILABLE,
             )
         )
+        # The value is the bare count so that copying the row yields a number
+        # that can be pasted somewhere; the SMT state rides alongside it as a
+        # gloss, which is what makes the row read "16 - SMT enabled".
         section.add(
             self.row(
                 "smt",
                 "Logical threads",
-                f"{thread_count} — SMT {'enabled' if smt_on else 'disabled'}"
-                if core_count
-                else str(thread_count),
+                str(thread_count),
+                gloss=("SMT enabled" if smt_on else "SMT disabled") if core_count else "",
             )
         )
         if per_core:

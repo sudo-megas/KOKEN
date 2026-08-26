@@ -346,11 +346,16 @@ class Window(QMainWindow):
         self.scroll.verticalScrollBar().setValue(0)
 
     def _glossed(self, row) -> str:
-        """``16`` becomes ``16 — SMT enabled`` when the corpus has a short gloss."""
-        if self._explanations is None:
-            return row.value
-        short = self._explanations.short(row.id)
-        return f"{row.value} — {short}" if short else row.value
+        """``16`` becomes ``16 — SMT enabled``.
+
+        The gloss is for reading and the value is for pasting, so the two are
+        kept apart right up to this point: the row widget is handed the joined
+        text to display and the bare value to copy.
+        """
+        gloss = getattr(row, "gloss", "")
+        if not gloss and self._explanations is not None:
+            gloss = self._explanations.short(row.id) or ""
+        return f"{row.value} — {gloss}" if gloss else row.value
 
     def _body_for(self, row) -> str:
         if getattr(row, "body", ""):

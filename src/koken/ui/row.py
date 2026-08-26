@@ -24,7 +24,7 @@ widgets does for free and what any popup would have had to fake.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFontDatabase, QFontMetrics, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -94,6 +94,20 @@ class ElidingLabel(QLabel):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._apply()
+
+    def sizeHint(self):  # noqa: N802 - Qt naming
+        """Measured from the full text, never from the elided text.
+
+        Taking the hint from what is currently displayed would feed back on
+        itself: eliding shortens the text, the shorter text asks for less
+        width, less width elides further, and a value with room to spare ends
+        up truncated to a few characters.
+        """
+        metrics = QFontMetrics(self.font())
+        return QSize(
+            metrics.horizontalAdvance(self._full or self.text()),
+            metrics.height(),
+        )
 
     def minimumSizeHint(self):  # noqa: N802 - Qt naming
         hint = super().minimumSizeHint()

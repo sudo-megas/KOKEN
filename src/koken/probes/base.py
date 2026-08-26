@@ -69,6 +69,12 @@ class Row:
     # in the explanation file. Only the About section uses this, to show the
     # licence text without putting 35 kB of GPL into a user-editable TOML.
     body: str = ""
+    # An inline gloss the probe supplies, shown after the value the same way
+    # the explanation file's `short` is. It exists for the handful of glosses
+    # that depend on the machine and so cannot live in a static corpus: "SMT
+    # enabled" is only true on a machine where it is. The value itself stays
+    # raw either way, because the value is what gets copied.
+    gloss: str = ""
 
     def __post_init__(self) -> None:
         if not self.key:
@@ -477,6 +483,7 @@ class Probe:
         severity: str = NORMAL,
         key: str = "",
         body: str = "",
+        gloss: str = "",
     ) -> Row:
         return Row(
             id=self.key(field_name),
@@ -486,6 +493,7 @@ class Probe:
             severity=severity,
             key=key,
             body=body,
+            gloss=gloss,
         )
 
     def empty_section(

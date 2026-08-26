@@ -32,7 +32,9 @@ from .ui.mountrow import make_factory
 from .ui.window import Window
 
 APPLICATION_NAME = "koken"
-DESKTOP_FILE = "com.github.sudo_megas.koken"
+# Must match the installed koken.desktop basename, or a Wayland
+# compositor cannot match the window to its launcher entry.
+DESKTOP_FILE = "koken"
 
 
 class Application(QObject):

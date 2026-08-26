@@ -1,0 +1,927 @@
+## KOKEN - explanations
+##
+## This file is yours. It was copied here the first time KOKEN ran, and it is
+## never touched again - not by an upgrade, not by anything. Edit it freely.
+##
+## Keys are row ids, written as branch.section.field, matching the rows on
+## screen exactly. Two keys per entry, both optional:
+##
+##   short   a few words, appended to the value as "16 - SMT enabled"
+##   long    the paragraph that appears when you click the row
+##
+## A row with no entry here shows its value normally and simply has no
+## expander. That is how this file grows: add a key, restart, done. No release
+## is needed and nothing else has to change.
+##
+## Blocks are in the same order as the branches in the application, so filling
+## a gap means finding the right block rather than searching the whole file.
+##
+## Because this file is never overwritten, a newer version of KOKEN will not
+## bring you newer explanations. Delete this file and relaunch to take the
+## shipped corpus again - you will lose any edits you have made here.
+
+
+# ==========================================================================
+# HARDWARE
+# ==========================================================================
+
+# ---- CPU -----------------------------------------------------------------
+
+[hardware.cpu.smt]
+long = """
+Simultaneous multithreading lets each physical core hold two instruction
+streams at once, so the second stream can use execution units the first
+leaves idle while it waits on memory. It is not a second core: under a fully
+saturated load, expect roughly 20 to 30 percent more throughput, not double.
+
+Disabling it in firmware can slightly improve how consistent per-thread
+latency is, which is why some competitive gaming guides recommend it, but for
+mixed desktop work leaving it on is almost always correct.
+"""
+
+[hardware.cpu.cores]
+long = """
+The number of physical cores, worked out from the kernel's topology rather
+than from the processor's name. Each one is a real, independent execution
+engine with its own registers and its own L1 and L2 cache.
+
+This is the number that matters when you are deciding how many parallel jobs
+to run. The logical thread count above it is larger on a machine with SMT,
+and treating those threads as though they were cores is how a build ends up
+slower than it needed to be.
+"""
+
+[hardware.cpu.ccx]
+long = """
+On a processor built from chiplets, cores are grouped into complexes, and
+each complex has its own slice of L3 cache. A core reaches its own complex's
+L3 quickly; reaching the L3 attached to another complex means crossing the
+interconnect, which takes noticeably longer.
+
+KOKEN derives this grouping from which cores report sharing an L3 instance,
+because no firmware publishes it directly. It matters for anything latency
+sensitive: a game pinned to cores spread across two complexes can be measurably
+worse than the same game confined to one, and it is the reason processors with
+extra cache on a single chiplet behave the way they do.
+"""
+
+[hardware.cpu.governor]
+long = """
+The governor decides how the processor picks its clock speed moment to moment.
+
+"performance" holds the clock high and reacts instantly, at the cost of power
+and heat. "powersave" is the opposite name for two quite different things:
+with the older acpi-cpufreq driver it really does keep clocks low, but with
+intel_pstate or amd-pstate it is the normal, fully dynamic mode and is what
+most distributions ship. "schedutil" lets the kernel's scheduler set the
+clock from what it already knows about the run queue, and is usually the best
+default on a desktop.
+
+If a machine feels sluggish for the first second of every interaction, the
+governor and the driver above it are the first place to look.
+"""
+
+[hardware.cpu.core_clock]
+long = """
+What this particular logical processor is running at right now.
+
+Idle cores drop to their lowest step within milliseconds, so a mostly idle
+machine showing a low number here is behaving correctly, not throttling. Modern
+processors also boost individual cores well past their rated base clock when
+only a few are busy, so a spread of very different numbers across cores is
+normal and healthy.
+"""
+
+[hardware.cpu.cache_l1]
+long = """
+The first level of cache, private to each core, and the fastest memory in the
+machine - a few cycles away rather than a few hundred. It is split into two
+halves, one for data and one for instructions, because a core needs to fetch
+both at once and a single shared cache would make them queue.
+
+It is small by design. Making L1 bigger makes it slower, and a slower L1 costs
+more than a larger one gains.
+"""
+
+[hardware.cpu.cache_l2]
+long = """
+The second level, still private to a core on most modern processors but
+several times larger and several times slower than L1. Everything L1 evicts
+lands here, and a hit at this level costs perhaps a dozen cycles instead of
+the hundreds a trip to main memory would.
+"""
+
+[hardware.cpu.cache_l3]
+long = """
+The last level before main memory, and the one shared between cores. Its size
+is the number quoted in reviews, and it is the cache that decides how a
+processor behaves on workloads with a large working set: if the data a game or
+a compiler keeps returning to fits in L3, it never has to wait on memory at
+all.
+
+On a chiplet processor the L3 is not one pool. Each complex has its own, and
+the "shared by" count on this row tells you how many threads are really
+competing for this particular slice.
+"""
+
+[hardware.cpu.microarch_level]
+long = """
+The x86-64 feature levels are a shorthand the toolchain uses: v2 is roughly
+2009 onwards, v3 adds AVX2 and is roughly 2015 onwards, v4 adds the AVX-512
+family. Some distributions now build packages for v3, and those packages
+simply will not run on a processor that does not reach it.
+
+This row is the level this processor satisfies, worked out from the feature
+flags it reports rather than from its model name.
+"""
+
+[hardware.cpu.vuln_summary]
+long = """
+The kernel tracks every published side-channel weakness it knows how to detect
+and reports, per issue, whether this processor is affected and what is being
+done about it. This row counts them.
+
+"Not affected" is the best answer and is common on recent hardware. "Mitigation"
+means the kernel is working around the issue, usually at some cost to
+performance. A count above zero here is worth reading through, but it is not
+cause for alarm on its own: several of these issues need an attacker already
+running code on the machine.
+"""
+
+[hardware.cpu.vuln]
+long = """
+One published processor weakness, and what the kernel is doing about it.
+
+"Not affected" means this silicon never had the problem. "Mitigation: ..."
+names the workaround in force, which usually costs a little performance and
+occasionally a lot. "Vulnerable" means the kernel knows the problem is present
+and is not working around it - normally because the mitigation was turned off
+on the kernel command line, or because a microcode update that the fix depends
+on has not been installed.
+
+Firmware updates matter here. Several of these can only be mitigated properly
+with newer microcode, which arrives either in a firmware update or in the
+distribution's microcode package.
+"""
+
+[hardware.cpu.microcode]
+long = """
+The processor's own firmware revision. Intel and AMD both ship microcode
+updates, and the kernel loads a newer one at boot if the distribution has
+packaged it - so this number can be ahead of what the motherboard firmware
+contains.
+
+It is worth knowing because several of the vulnerability mitigations listed
+elsewhere in this section depend on a minimum microcode revision, and without
+it the kernel reports the issue as unmitigated no matter what else is set.
+"""
+
+[hardware.cpu.offline]
+long = """
+Processors the kernel can see but is not scheduling on. A core can be taken
+offline deliberately, by a power management policy, or by the firmware.
+
+On a normal desktop this is empty. Anything listed here is capacity the
+machine has and is not using.
+"""
+
+# ---- Memory --------------------------------------------------------------
+
+[hardware.memory.channels]
+long = """
+Memory controllers read from several channels at once, and each populated
+channel adds bandwidth. Two identical sticks in the correct pair of slots run
+in dual channel and give roughly twice the bandwidth of the same two sticks in
+the wrong pair.
+
+Getting this wrong is easy and quiet. The machine boots either way, all the
+memory is available either way, nothing warns you, and the difference shows up
+only as everything being slightly slower - most visibly in integrated graphics,
+which have no memory of their own and lose the most.
+
+KOKEN works this out from the channel each populated slot reports belonging
+to. If this row says single channel and more than one module is installed, the
+motherboard manual will show which slots the pair belongs in. It is usually
+slots two and four.
+"""
+
+[hardware.memory.dimm_underclocked]
+long = """
+This module is rated for a higher speed than it is running at.
+
+That is the normal state of a new machine. Memory rated above the official
+standard only reaches its advertised speed when the firmware profile that
+describes it - XMP on Intel boards, EXPO on AMD ones - is switched on, and it
+ships switched off. Until it is enabled the modules run at the plain standard
+speed, which is what this row is comparing against.
+
+Enabling it is a firmware setting. It is the single largest free performance
+difference on most self-built machines.
+"""
+
+[hardware.memory.available]
+long = """
+How much memory could be given to a new program right now, which is not the
+same as how much is free.
+
+The kernel uses everything spare for caching files, and gives that cache back
+the moment something needs the memory. So "free" is usually small and
+alarming-looking on a healthy machine, and this row is the number that
+actually answers "am I running out?".
+"""
+
+[hardware.memory.in_use]
+long = """
+Total memory minus what is available to a new program. This is the figure a
+task manager shows, and it excludes the file cache, which the kernel will
+surrender on demand.
+
+Sustained use near total, with swap filling as well, is the point at which a
+machine starts to feel slow.
+"""
+
+[hardware.memory.ecc]
+long = """
+Whether the memory can correct errors. ECC memory carries extra bits that let
+the controller fix a single flipped bit and notice a double one.
+
+Consumer desktop platforms almost always report "None" here, and that is
+expected. It matters most for machines that hold data in memory for a long
+time before writing it - file servers, and anything running a filesystem that
+trusts what it is given.
+"""
+
+[hardware.memory.max_capacity]
+long = """
+The largest amount of memory this board's firmware says it will accept. It is
+a firmware claim rather than a measurement, and some firmware reports an
+absurdly high theoretical number, so treat it as a ceiling rather than a
+promise.
+"""
+
+# ---- Graphics ------------------------------------------------------------
+
+[hardware.graphics.link_width]
+long = """
+The number of PCIe lanes the card negotiated with the board at boot. A card
+built for sixteen lanes running at eight has half the bandwidth to the rest of
+the machine, permanently, until something physical changes.
+
+The usual causes are all mundane: the card is in a secondary slot that is only
+wired for eight lanes, an M.2 drive is populated that shares lanes with the
+first slot, or a riser cable is marginal. Nothing warns you. The machine works
+and games run; they simply run worse, most noticeably when video memory is
+full and textures are being fetched across the link.
+
+If this row shows fewer lanes than the maximum, the motherboard manual's slot
+diagram is the place to start.
+"""
+
+[hardware.graphics.link_speed]
+long = """
+The per-lane signalling rate the link is running at right now.
+
+Unlike the lane count, a low number here is usually correct. Graphics cards
+drop their link to the slowest rate when idle to save power and raise it under
+load within microseconds, so an idle desktop showing 2.5 GT/s against a maximum
+of 16 GT/s is behaving exactly as designed.
+
+It is worth a second look only if it stays low while the card is genuinely
+busy, which can indicate a marginal connection or a firmware setting pinning
+the link generation lower than the card supports.
+"""
+
+[hardware.graphics.vram]
+long = """
+The memory attached to the graphics card itself, which is separate from system
+memory and much faster for the card to reach.
+
+When a workload needs more than this, the driver spills the excess into system
+memory across the PCIe link. That still works, but it is far slower, and it is
+the point at which frame times usually become uneven rather than merely lower.
+"""
+
+[hardware.graphics.temperature]
+long = """
+A temperature reported by the card. Modern cards publish several: the edge
+sensor is the coolest and the least useful, the junction or hotspot sensor is
+the hottest point on the die and is what the card actually manages itself
+against, and the memory sensor tracks the memory packages.
+
+Junction temperatures in the eighties or nineties under load are within
+specification for current designs. Sustained readings at the critical figure
+shown alongside mean the card is reducing its clocks to keep itself safe.
+"""
+
+[hardware.graphics.vbios]
+long = """
+The firmware built into the graphics card, as distinct from the driver running
+on the processor. It is the part number the board partner assigned to this
+exact board revision.
+
+There is no other interface to it: the kernel exposes it only through a
+debugfs file that ordinary users cannot read, which is why this row needs the
+administrator password KOKEN asks for at launch.
+"""
+
+# ---- Displays ------------------------------------------------------------
+
+[hardware.displays.manufactured]
+long = """
+Displays record the week and year they were built into the description block
+they send the computer, and there is no other way to find it - there is no menu
+for it, and any sticker has usually long since come off.
+
+This is worth knowing on a second-hand panel, on a warranty replacement that
+may be older than the machine, and on any display where the backlight or the
+panel has begun to age. On an OLED it is the closest thing to a service life
+figure you will get.
+
+Some displays set this to a model year rather than a manufacture date, in which
+case KOKEN says so rather than implying a precision that is not there.
+"""
+
+[hardware.displays.native_mode]
+short = "native"
+long = """
+The resolution and refresh rate the display describes as its preferred mode.
+This is the panel's real pixel grid; anything else is being scaled, which on
+an LCD or OLED always costs sharpness.
+
+The refresh rate here comes from the base description block, which cannot
+express very high rates. A display capable of more will show its full range in
+the supported range row, and the higher modes live in extension blocks that
+KOKEN does not unpack.
+"""
+
+[hardware.displays.serial]
+long = """
+The display's own serial number, as it reports it. Useful for warranty claims
+and for telling two identical panels apart when the machine has more than one.
+
+Not every manufacturer fills it in, and some write the same number into every
+unit of a model.
+"""
+
+[hardware.displays.size]
+long = """
+The physical size of the panel, as the display reports it, and the diagonal
+worked out from it.
+
+Firmware writes this field carelessly rather often, so a figure that disagrees
+with the box by an inch is a reporting error rather than a measurement. It is
+what the desktop uses to decide scaling, which is why a display that lies about
+its size can produce text that is subtly the wrong size everywhere.
+"""
+
+# ---- Motherboard ---------------------------------------------------------
+
+[hardware.motherboard.bios_version]
+long = """
+The motherboard firmware revision currently installed. Compare it against what
+the board manufacturer publishes: firmware updates on modern platforms carry
+memory compatibility fixes, processor support for parts newer than the board,
+and the microcode that several of the processor vulnerability mitigations
+depend on.
+
+The date beside it is often more useful than the version string, which
+manufacturers number inconsistently.
+"""
+
+[hardware.motherboard.boot_mode]
+long = """
+Whether the machine started through UEFI or through the older BIOS
+compatibility path.
+
+It matters more than it sounds. Secure Boot only exists under UEFI, disk
+layouts differ between the two, and a system installed one way will not boot
+the other way without being reinstalled or repaired. If you did not expect to
+see "Legacy BIOS" here, the firmware's boot mode setting is worth checking
+before anything else.
+"""
+
+# ==========================================================================
+# SYSTEM
+# ==========================================================================
+
+# ---- Operating system ----------------------------------------------------
+
+[system.os.uptime]
+long = """
+How long since the machine last booted. A long uptime is not the achievement it
+once was: kernel updates only take effect after a restart, so a machine that
+has been up for months is running the kernel it had months ago, security fixes
+included.
+"""
+
+[system.os.loadavg]
+long = """
+The average number of processes wanting to run, over the last one, five and
+fifteen minutes.
+
+Compare it against the logical processor count, not against a fixed number. On
+a sixteen-thread machine a load of four is quiet; on a two-thread machine it
+means everything is waiting. Rising left to right means the machine is getting
+busier, falling means it is recovering.
+
+Processes waiting on a slow disk count towards this on Linux, so a high load
+with idle processors usually means storage rather than computation.
+"""
+
+# ---- Kernel --------------------------------------------------------------
+
+[system.kernel.flavour]
+long = """
+Distributions ship several kernels built from the same source with different
+settings, and the suffix on the version is how they identify themselves.
+
+The differences are real: a long-term-support kernel trades new hardware
+support for stability, a desktop-tuned build changes the scheduler and
+preemption settings in ways you can feel in interactive latency, and a hardened
+build turns on checks that cost performance. If a machine behaves differently
+from an otherwise identical one, this row is often why.
+"""
+
+[system.kernel.preemption]
+long = """
+How readily the kernel will interrupt itself to run something more urgent.
+
+More preemption means better worst-case latency and slightly lower total
+throughput, which is the correct trade for a desktop and the wrong one for a
+batch server. PREEMPT_DYNAMIC means the choice can be made at boot rather than
+at build time, and is what most current distributions ship.
+"""
+
+[system.kernel.tainted]
+long = """
+The kernel marks itself tainted when something happens that makes a bug report
+harder to trust: a proprietary module was loaded, a module was forced in, or
+the kernel already hit a warning or an oops since boot.
+
+It is not a fault on its own, and a machine with a proprietary graphics driver
+is tainted permanently and works perfectly. It matters when you are reporting a
+problem upstream, where a tainted kernel is the first thing anyone asks about.
+"""
+
+[system.kernel.cmdline_parameter]
+long = """
+One parameter the bootloader passed to the kernel at startup. These are set in
+the bootloader's configuration, and they are the main way of changing kernel
+behaviour that cannot be changed while it is running.
+
+They are worth checking after a firmware update or a distribution upgrade, both
+of which can rewrite the bootloader configuration and quietly drop a parameter
+you had added on purpose.
+"""
+
+[system.kernel.entropy]
+long = """
+How much unpredictable data the kernel has available for generating keys and
+random numbers.
+
+On any machine built in the last decade this stays comfortably high, because
+the processor has a hardware random number generator the kernel draws on. It
+is only ever a problem on small embedded boards, where it can stall a boot
+waiting for enough randomness to seed itself.
+"""
+
+[system.kernel.module]
+long = """
+A driver or feature the kernel loaded at runtime rather than having built in.
+The size is how much memory it occupies, and "used by" lists the other modules
+depending on it.
+
+A module loaded but not in use is normal: the kernel loads drivers speculatively
+when hardware appears and does not always unload them again.
+"""
+
+# ---- Desktop -------------------------------------------------------------
+
+[system.desktop.session_type]
+long = """
+Whether this session runs on Wayland or on X11.
+
+The difference reaches applications: screen capture, global shortcuts, remote
+control and colour management all work differently, and an application written
+for one and run under the other goes through a compatibility layer. If
+something behaves oddly in ways that seem to be about the display rather than
+about itself, this row is the first thing to check.
+"""
+
+[system.desktop.portal]
+long = """
+xdg-desktop-portal is the service desktop applications ask for things they
+cannot do themselves - file dialogs, screen sharing, and the light or dark
+preference.
+
+KOKEN uses it for exactly one thing: asking whether the system is set to light
+or dark, so it can pick a matching palette and change with it. If the portal is
+not there, KOKEN uses its dark palette and everything else works as normal.
+"""
+
+# ---- Security ------------------------------------------------------------
+
+[system.security.secure_boot]
+long = """
+Secure Boot means the firmware checks a signature on everything it starts, so
+that something which has replaced your bootloader cannot start instead of it.
+
+Whether you want it on is a genuine question rather than a settled one. It
+protects against a real class of attack that survives reinstalling the
+operating system. It also refuses to load unsigned kernel modules, which
+breaks proprietary graphics drivers and out-of-tree modules unless you enrol
+your own key.
+
+KOKEN reads this from the fifth byte of the firmware variable, which is the
+only byte in it that means anything; the four before it describe the variable
+rather than its value.
+"""
+
+[system.security.lockdown]
+long = """
+Kernel lockdown restricts what even the administrator may do to the running
+kernel, on the reasoning that root should not be able to silently rewrite the
+kernel underneath a verified boot.
+
+"none" is the ordinary desktop setting. "integrity" blocks the paths that
+would let something modify the running kernel. "confidentiality" also blocks
+the ones that would let it read kernel memory, which disables some debugging
+and profiling tools entirely. Machines with Secure Boot enabled often turn this
+on automatically.
+"""
+
+[system.security.iommu]
+long = """
+The IOMMU sits between devices and memory and restricts which memory each
+device may reach.
+
+Without it, any device that can perform direct memory access can read and write
+all of memory - which is what it is for, and also what makes a malicious device
+on a Thunderbolt or PCIe port able to take the whole machine. With it, a device
+sees only what it has been given.
+
+It is also what makes passing a graphics card through to a virtual machine
+possible, and the groups it reports are the units that can be passed through
+together.
+"""
+
+[system.security.vulnerabilities]
+long = """
+A count of the published processor side-channel issues the kernel tracks, and
+how many of them are not currently mitigated on this machine.
+
+The Hardware branch, under CPU, Vulnerabilities, has one row per issue with the
+kernel's own wording, which is the place to look at what any individual one
+says.
+"""
+
+[system.security.aslr]
+long = """
+Address space layout randomisation puts a program's stack, libraries and heap
+at different addresses on every run, so an attacker who finds a flaw cannot
+rely on knowing where anything is.
+
+Full randomisation is the correct setting and is what every distribution ships.
+Anything lower has almost certainly been set deliberately, usually for
+debugging, and is worth putting back.
+"""
+
+[system.security.tpm]
+long = """
+A small dedicated chip that can hold keys and measure what the machine started
+with.
+
+Its practical use on a Linux desktop is disk encryption that unlocks without
+you typing a passphrase, by releasing the key only when the boot sequence
+matches what it was told to expect. That convenience is also its limitation:
+anything that legitimately changes the boot sequence, including a firmware
+update, stops it releasing the key.
+"""
+
+# ==========================================================================
+# STORAGE
+# ==========================================================================
+
+# ---- Disks ---------------------------------------------------------------
+
+[storage.disks.smart]
+long = """
+The drive's own assessment of whether it expects to fail soon.
+
+"OK" is not a promise. SMART is good at spotting a drive that is wearing out
+gradually and poor at spotting one about to fail suddenly, and a meaningful
+share of drives fail with a clean SMART report right up until they stop.
+Treat it as one input and not as a backup strategy.
+
+"Failing" is the other way round, and should be taken completely seriously.
+A drive that says it expects to fail is usually right, and the correct
+response is to copy the data off now rather than to investigate further.
+"""
+
+[storage.disks.power_on]
+long = """
+How long the drive has been running since it was manufactured, which is
+frequently not how long you have owned it.
+
+It is the first thing to check on a second-hand or refurbished drive, where a
+few hundred hours and forty thousand hours are both plausible and only one of
+them matches the description. For context, a drive left on continuously
+accumulates about 8,760 hours a year.
+
+Hours alone say little about a solid state drive's remaining life - the amount
+written matters far more - but they say a great deal about a mechanical one,
+where the bearings and the motor are what wear out.
+"""
+
+[storage.disks.bad_sectors]
+short = "bad sectors"
+long = """
+Sectors the drive has found to be unreliable and remapped to spare capacity,
+plus any it is currently unsure about.
+
+A handful that appeared once and never grew is tolerable. A number that keeps
+rising is a drive in the process of failing, and the rising is the signal
+rather than the total. On a mechanical drive this is one of the more reliable
+early warnings there is.
+"""
+
+[storage.disks.temperature]
+long = """
+The temperature the drive reports about itself.
+
+Mechanical drives prefer to stay under about fifty degrees; sustained heat
+shortens their life more than it does most components. Solid state drives run
+hotter by design and will slow themselves down rather than overheat, which
+usually shows up as a fast drive being inexplicably slow during a long copy.
+"""
+
+[storage.disks.kind]
+long = """
+Whether the kernel believes this device spins.
+
+It is worth checking because the answer drives other decisions automatically:
+the I/O scheduler chosen, whether the filesystem bothers reordering writes, and
+whether discard is used. A solid state drive misreported as rotational - which
+happens behind some RAID controllers and in some virtual machines - gets
+treated as though seeking were expensive, and is slower for it.
+"""
+
+[storage.disks.block_size]
+long = """
+The block size the drive advertises to the kernel, and the one it really uses
+internally.
+
+Where these differ - typically 512 bytes advertised over 4096 real - every
+write smaller than the physical block turns into a read, a modify and a write.
+Correctly aligned partitions make this invisible. A partition misaligned by
+half a block, which was easy to create with older tools, makes it permanent.
+"""
+
+[storage.disks.discard]
+long = """
+Whether the drive can be told which blocks no longer hold anything.
+
+Solid state drives need this. A drive that is never told what is free has to
+assume every block is in use, which makes its internal housekeeping far less
+effective and shows up as write performance falling away over months. Most
+distributions run a weekly trim, which is enough; continuous discard on every
+delete is also possible and is usually slower.
+"""
+
+[storage.disks.scheduler]
+long = """
+How the kernel orders requests before sending them to the drive.
+
+"none" is right for fast solid state drives, where reordering costs more time
+than it saves. "mq-deadline" adds a latency guarantee. "bfq" tries hard to keep
+interactive work responsive while something large runs in the background, and
+is a good choice on a mechanical drive and a debatable one on a fast NVMe.
+"""
+
+# ---- Volumes -------------------------------------------------------------
+
+[storage.volumes.mount_state]
+long = """
+Where this filesystem is attached, or that it is not attached at all.
+
+The button on this row is the only control in KOKEN, and the only thing this
+application can change about your machine. It never forces anything: if the
+system says a filesystem is busy, that answer stands, and forcing it past that
+point is how data in flight gets lost.
+
+A single click does not act. The first click arms the button and gives you five
+seconds to confirm or to leave it alone.
+
+Rows for filesystems the running system depends on - the root, the boot
+partition, your home directory - are shown in the warning colour, so that the
+button on them is visibly not the same object as the button on a memory stick.
+"""
+
+[storage.volumes.free]
+long = """
+Space still available. Two numbers appear when they differ: filesystems reserve
+a percentage for the administrator so that a full disk does not stop the
+machine from booting, and the smaller figure is what you can actually use.
+
+Filesystems slow down as they fill, and copy-on-write filesystems slow down
+sooner and more sharply than others. Below about ten percent free is worth
+acting on.
+"""
+
+[storage.volumes.filesystem]
+long = """
+The kind of filesystem on this volume, detected from what is written on it
+rather than from what any configuration file claims.
+
+If this says something you did not expect, or says nothing at all on a volume
+you know holds data, stop before doing anything else to it.
+"""
+
+# ---- Filesystems ---------------------------------------------------------
+
+[storage.filesystems.swap_absent]
+long = """
+Swap gives the kernel somewhere to put pages it does not currently need, so
+that memory can be used for something better.
+
+Without any, a machine that runs out of memory has no gentle option left and
+starts killing processes instead. Swap is also what hibernation writes to, so a
+machine without it cannot hibernate. A swap file works as well as a partition
+on any modern filesystem.
+"""
+
+[storage.filesystems.mount_options]
+long = """
+The options this filesystem was mounted with. The ones worth noticing:
+
+"ro" means read only, which on a filesystem you expected to write to usually
+means the kernel remounted it that way after an error - check the system log.
+"noexec", "nosuid" and "nodev" restrict what may be run from the filesystem
+and are ordinary on removable media. "noatime" stops the kernel writing an
+access time on every read. "compress" and "subvol" are btrfs settings, and the
+subvolume is which part of the filesystem this mount point exposes.
+"""
+
+# ==========================================================================
+# PERIPHERALS
+# ==========================================================================
+
+# ---- USB -----------------------------------------------------------------
+
+[peripherals.usb.speed]
+long = """
+The rate this device negotiated with the port it is plugged into, which is the
+lower of what the two support.
+
+A drive capable of 5 Gbit/s showing 480 Mbit/s is plugged into a USB 2.0 port,
+or through a hub or cable that only carries USB 2.0 - and a great many cables
+sold for charging carry only the USB 2.0 wires. This is the row that explains
+why copying to a fast external drive is taking ten times longer than it should.
+"""
+
+[peripherals.usb.max_power]
+long = """
+How much current this device told the port it may draw.
+
+It is a declaration rather than a measurement, and it is what a bus-powered hub
+uses to decide whether it can accept another device. Devices refusing to work
+through an unpowered hub have usually run into this limit.
+"""
+
+# ---- PCI -----------------------------------------------------------------
+
+[peripherals.pci.link_width]
+long = """
+How many PCIe lanes this device negotiated with the board.
+
+Fewer than the maximum means less bandwidth, permanently. On a graphics card
+the effect is well known; on a storage controller or a network card it is the
+same problem and far less often noticed. A four-lane NVMe drive running at two
+lanes reaches roughly half its rated speed and gives no other sign of it.
+
+The usual cause is slot sharing: populating one slot on a consumer board often
+takes lanes away from another, and which combinations conflict is in the
+motherboard manual.
+"""
+
+[peripherals.pci.link_speed]
+long = """
+The signalling rate per lane, and the PCIe generation it corresponds to.
+
+Devices lower this when idle to save power and raise it under load, so a low
+reading on a quiet machine is normal. A device pinned below what it supports
+while busy is worth investigating - usually a firmware setting, occasionally a
+signal integrity problem on a long or poorly seated connection.
+"""
+
+[peripherals.pci.iommu_group]
+long = """
+The set of devices the IOMMU can only isolate together.
+
+This matters if you intend to pass a device through to a virtual machine: you
+must pass the whole group, not one device from it. A graphics card sharing a
+group with a controller you need on the host is the usual obstacle, and it is a
+property of how the board is wired rather than anything that can be configured.
+"""
+
+# ---- Network -------------------------------------------------------------
+
+[peripherals.network.speed]
+long = """
+The rate the link negotiated with whatever is at the other end.
+
+A gigabit card showing 100 Mbit/s has negotiated down, and the cause is nearly
+always physical: a damaged cable, a cable with only four of its eight wires
+connected, or a switch port that is limited. It is one of the most common and
+least visible causes of a network being slower than it should be.
+
+Wireless interfaces do not answer this at all - a wireless link has no single
+fixed rate - and neither does an interface that is down. Both are reported as
+such rather than as an error.
+"""
+
+[peripherals.network.carrier]
+long = """
+Whether the interface can see something at the other end of the cable.
+
+No carrier on a wired interface means the cable, the port, or the device at the
+far end - and it is a more direct answer than anything higher up the stack can
+give you, because it is the hardware itself reporting what it detects.
+"""
+
+[peripherals.network.counter]
+long = """
+Bytes and packets since the interface came up, along with errors and drops.
+
+Errors and drops should be zero or very close to it. A steadily rising error
+count on a wired link points at the cable or the port; rising drops usually
+mean the machine could not keep up with what was arriving, which is a load
+problem rather than a wiring one.
+"""
+
+# ---- Power ---------------------------------------------------------------
+
+[peripherals.power.battery_health]
+long = """
+What the battery can hold today, as a share of what it was built to hold.
+
+This is the number that matters, and it is not the one the desktop shows. A
+battery at 62 percent health reporting 100 percent charge is genuinely full and
+holds under two thirds of its original capacity - so the same laptop, doing the
+same work, lasts under two thirds as long as it did when new.
+
+Batteries lose capacity with charge cycles, with time, and much faster when
+kept hot or held at full charge. Below about eighty percent is generally
+considered worn; below fifty is usually the point at which replacing it changes
+how the machine can be used.
+"""
+
+[peripherals.power.battery_cycles]
+long = """
+How many full charge cycles the battery has been through. Partial charges add
+up: two half discharges count as one cycle.
+
+Manufacturers typically rate a battery to keep eighty percent of its capacity
+for somewhere between three hundred and a thousand cycles. Not every battery
+counts this, and some count it in their own way, so treat it as supporting
+evidence for the health figure rather than as a measurement in its own right.
+"""
+
+[peripherals.power.battery_absent]
+long = """
+No battery is present on this machine.
+
+On a desktop that is simply the correct answer, and this section still appears
+so that the layout does not change depending on what hardware is fitted.
+
+On a portable machine it means something else: the battery is not being
+reported at all, which points at the firmware or at the kernel module rather
+than at the battery.
+"""
+
+[peripherals.power.battery_draw]
+long = """
+How much power the battery is delivering or taking in at this moment.
+
+Divide the battery's capacity in watt-hours by this figure for a rough idea of
+the runtime at the present rate. It moves a great deal with what the machine is
+doing, so a reading taken while the screen is bright and something is compiling
+is not the number to plan around.
+"""
+
+# ---- Sensors -------------------------------------------------------------
+
+[peripherals.sensors.reading]
+long = """
+One reading from a hardware monitoring chip, converted from the fixed-point
+integers the kernel publishes into a unit that means something.
+
+The critical figure alongside a temperature is the point at which the hardware
+protects itself, by slowing down or by shutting off. Approaching it under load
+is a cooling problem: dust, a fan that has stopped, or thermal paste that has
+dried out.
+
+Sensor names come from the driver, and some drivers label them poorly or not at
+all. A voltage or temperature that looks impossible is usually a mislabelled
+channel rather than a failing component.
+"""
