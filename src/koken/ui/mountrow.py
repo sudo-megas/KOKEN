@@ -17,9 +17,13 @@ It exists because an otherwise inert browser, where every other row does
 nothing at all, is exactly the kind of interface where a mis-click unmounts a
 drive mid-write. Inert rows need no friction. This one does.
 
-Failures are reported in the row's own expansion body, in plain language, and
-stay there until the next action or refresh. They do not go to the footer and
-they do not open anything.
+Three things here are shaped by the fact that a successful call destroys the
+very row that made it. The reply can land after the row is gone, so it is
+checked for liveness before any widget is touched and the storage refresh is
+run either way. The message that a call produced has to outlive the rebuild, so
+it is left in :data:`_PENDING_NOTICE` for the replacement row to pick up. And
+the armed-row marker is validated before use, because a rebuild can leave it
+pointing at a widget whose C++ half is already deleted.
 """
 
 from __future__ import annotations
@@ -28,8 +32,12 @@ from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import QPushButton
 
 from .. import icons
-from ..probes.base import WARNING
-from ..probes.volumes import STATE_MOUNTED, STATE_NO_FILESYSTEM, STATE_UNMOUNTED
+from ..probes.volumes import (
+    NOT_MOUNTED_TEXT,
+    STATE_MOUNTED,
+    STATE_NO_FILESYSTEM,
+    STATE_UNMOUNTED,
+)
 from .row import ContentRow
 
 ARM_SECONDS = 5
@@ -48,6 +56,37 @@ WORKING_LABEL = "Working…"
 # Only one row may be armed at a time. Arming a second disarms the first, which
 # is the concrete meaning of "reverts if focus moves elsewhere".
 _armed_row: "MountStateRow | None" = None
+
+# A message produced by a call that then rebuilt the view, keyed by device node.
+# CORE 12.4 requires the stale-view sentences to be shown, and the row that
+# would have shown them no longer exists by the time the refresh is done, so the
+# replacement row collects the message instead.
+_PENDING_NOTICE: dict[str, str] = {}
+
+
+def _is_alive(widget) -> bool:
+    """Whether the C++ half of *widget* still exists.
+
+    An asynchronous reply can arrive after the user has crossed to another tab,
+    which destroys every row in the old view. Touching one then raises out of a
+    D-Bus callback, which is both a crash and a silently skipped refresh.
+    """
+    try:
+        from shiboken6 import isValid
+
+        return isValid(widget)
+    except Exception:
+        return True
+
+
+def _current_armed() -> "MountStateRow | None":
+    """The armed row, if there still is one."""
+    global _armed_row
+    if _armed_row is None:
+        return None
+    if not _is_alive(_armed_row):
+        _armed_row = None
+    return _armed_row
 
 
 class MountStateRow(ContentRow):
@@ -73,10 +112,13 @@ class MountStateRow(ContentRow):
             parent=parent,
         )
         self.device_node = f"/dev/{section.id}"
-        self.volume_state = _state_of(row)
+        self.volume_state = _state_of(row.value)
+        # From here on set_value may re-derive the state from the row's text.
+        self._ready = True
         self._actions = actions
         self._on_success = on_success
         self._phase = IDLE
+        self._filter_installed = False
 
         self.button = QPushButton(self._header)
         self.button.setObjectName("mountButton")
@@ -98,13 +140,29 @@ class MountStateRow(ContentRow):
 
         self._apply_phase()
 
-        window = self.window()
-        if window is not None:
-            window.installEventFilter(self)
+        # A message left behind by the call that caused this row to be rebuilt.
+        notice = _PENDING_NOTICE.pop(self.device_node, "")
+        if notice:
+            self._show_notice(notice)
 
     # -- state -------------------------------------------------------------
 
-    def set_volume_state(self, state: str) -> None:
+    def set_value(self, text: str, severity: str = "normal", raw_value=None) -> None:
+        """Keep the button in step with the row's own text.
+
+        The volatile pass reaches this row the same way it reaches every other
+        one, so a volume mounted or unmounted from outside KOKEN updates the
+        text here. Without re-deriving the state from it, the button would go on
+        offering the action it was built with and send Mount to something that
+        is already mounted.
+        """
+        super().set_value(text, severity, raw_value=raw_value)
+        # ContentRow's constructor calls set_value before this subclass has
+        # finished initialising, so there is one call with no state to sync to.
+        if getattr(self, "_ready", False):
+            self._sync_state(_state_of(self.displayed_value()))
+
+    def _sync_state(self, state: str) -> None:
         if state == self.volume_state:
             return
         self.volume_state = state
@@ -136,12 +194,6 @@ class MountStateRow(ContentRow):
         else:
             glyph = icons.glyph(concept)
             self.button.setText(f"{glyph} {idle_label}" if glyph else idle_label)
-            if glyph:
-                font = self.button.font()
-                # The glyph and the label share one button, so the button uses
-                # the interface font and Qt falls back to the icon font for the
-                # single character it cannot draw.
-                self.button.setFont(font)
             self._set_armed_property(False)
 
     def _set_armed_property(self, armed: bool) -> None:
@@ -163,8 +215,9 @@ class MountStateRow(ContentRow):
 
     def arm(self) -> None:
         global _armed_row
-        if _armed_row is not None and _armed_row is not self:
-            _armed_row.disarm()
+        previous = _current_armed()
+        if previous is not None and previous is not self:
+            previous.disarm()
         _armed_row = self
         self._phase = ARMED
         self._apply_phase()
@@ -174,10 +227,29 @@ class MountStateRow(ContentRow):
         global _armed_row
         if _armed_row is self:
             _armed_row = None
-        self._timer.stop()
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            # The timer's C++ half went with the widget; nothing left to stop.
+            return
         if self._phase == ARMED:
             self._phase = IDLE
             self._apply_phase()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Install the focus guard on the real window, once it exists.
+
+        At construction the row has no parent, so ``window()`` answers with the
+        row itself. Waiting until the row is shown is the first moment there is
+        a window to watch.
+        """
+        super().showEvent(event)
+        if self._filter_installed:
+            return
+        window = self.window()
+        if window is not None and window is not self:
+            window.installEventFilter(self)
+            self._filter_installed = True
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
         """Disarm when the window stops being the one in front."""
@@ -211,31 +283,48 @@ class MountStateRow(ContentRow):
         method(self.device_node, self._finished)
 
     def _finished(self, result) -> None:
-        self._phase = IDLE
-        self._apply_phase()
+        alive = _is_alive(self)
 
         if result.ok or result.was_stale:
             # A stale view is refreshed the same way a success is: in both
-            # cases what is on screen no longer matches the machine.
-            self.set_body(result.message if result.was_stale else "")
-            self.set_value(self.value.full_text(), self._current_severity())
+            # cases what is on screen no longer matches the machine. The
+            # message, if there is one, is left for the row that replaces this.
+            if result.was_stale and result.message:
+                _PENDING_NOTICE[self.device_node] = result.message
+            if alive:
+                self._phase = IDLE
+                self._apply_phase()
+            # Run regardless of whether this row survived: the view is wrong
+            # either way, and refreshing it is the whole point of a success.
             if self._on_success is not None:
                 self._on_success()
             return
 
-        self.set_body(result.message)
+        if not alive:
+            return
+        self._phase = IDLE
+        self._apply_phase()
+        self._show_notice(result.message)
+
+    def _show_notice(self, message: str) -> None:
+        """Put a message under the row, styled as a warning, expanded.
+
+        CORE 12.4 puts failures here rather than in the footer, and styles them
+        as warnings. The row's own severity is left alone: on this row warning
+        already means "this filesystem is holding the running system up", and
+        overloading it would make a USB stick that failed to unmount look like
+        the root filesystem.
+        """
+        self.set_body(message)
+        self.body.setProperty("severity", "warning")
+        self.body.style().unpolish(self.body)
+        self.body.style().polish(self.body)
         self.set_expanded(True)
-        self.set_value(self.value.full_text(), WARNING)
-
-    def _current_severity(self) -> str:
-        return self.value.property("severity") or "normal"
 
 
-def _state_of(row) -> str:
-    """Read the volume's state back off the row volumes.py built."""
-    from ..probes.volumes import NOT_MOUNTED_TEXT
-
-    value = (row.value or "").strip()
+def _state_of(value: str) -> str:
+    """Read the volume's state back off the text volumes.py produced."""
+    value = (value or "").strip()
     if value == NOT_MOUNTED_TEXT:
         return STATE_UNMOUNTED
     if value.startswith("/") or value == "Mounted":
