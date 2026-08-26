@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+#
+# KOKEN - Machine Corpus
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+"""The only part of KOKEN that runs as root, for well under a second.
+
+It reads three things the kernel will not show an ordinary user, prints one
+JSON object on stdout, and exits. It imports nothing from ``koken``: it is a
+separate program that happens to ship in the same package, and it must stay
+runnable on its own::
+
+    sudo ./helper/koken-helper
+
+Running the GUI itself under pkexec was never an option. Root cannot connect to
+the user's Wayland compositor socket and cannot read ``XDG_RUNTIME_DIR`` across
+the uid boundary, so that approach appears to work on X11 and fails on Wayland.
+A short-lived text-only helper has neither problem.
+
+Everything that fails becomes a string in ``errors``. A partial read is a
+normal outcome and still exits 0; a non-zero exit means the helper genuinely
+crashed, and the caller treats that the same as a refusal.
+"""
+
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+
+SCHEMA_VERSION = 1
+
+# pkexec resets the environment to a minimal, trusted one, and its PATH does
+# not always include the sbin directories where dmidecode lives. Looking in
+# the known locations first is more reliable than trusting PATH.
+DMIDECODE_CANDIDATES = (
+    "/usr/sbin/dmidecode",
+    "/usr/bin/dmidecode",
+    "/sbin/dmidecode",
+    "/bin/dmidecode",
+)
+
+# Read from /sys/class/dmi/id/. Root-only, every one of them.
+SERIAL_FILES = ("product_serial", "board_serial", "product_uuid")
+
+DMIDECODE_TIMEOUT = 5
+
+
+def find_dmidecode():
+    for candidate in DMIDECODE_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def parse_dmidecode(text):
+    """Split dmidecode's output into one dict per record.
+
+    dmidecode prints a preamble, then records separated by blank lines. A
+    record opens with ``Handle 0x0009, DMI type 17, 32 bytes``, names its type
+    on the next line, and then lists ``Key: Value`` pairs one tab in. A key
+    whose value is empty introduces a list, whose items sit two tabs in - the
+    memory types a slot supports are written that way.
+    """
+    records = []
+    for block in text.split("\n\n"):
+        lines = block.split("\n")
+        handle_line = None
+        for index, line in enumerate(lines):
+            if line.startswith("Handle "):
+                handle_line = index
+                break
+        if handle_line is None:
+            continue
+
+        match = re.match(
+            r"Handle (0x[0-9A-Fa-f]+), DMI type (\d+)", lines[handle_line]
+        )
+        if not match:
+            continue
+
+        record = {
+            "handle": match.group(1),
+            "type": int(match.group(2)),
+            "name": lines[handle_line + 1].strip()
+            if handle_line + 1 < len(lines)
+            else "",
+            "fields": {},
+        }
+
+        current_list_key = None
+        for line in lines[handle_line + 2 :]:
+            if not line.strip():
+                continue
+            depth = len(line) - len(line.lstrip("\t"))
+            body = line.strip()
+            if depth >= 2 and current_list_key is not None:
+                record["fields"].setdefault(current_list_key, [])
+                if isinstance(record["fields"][current_list_key], list):
+                    record["fields"][current_list_key].append(body)
+                continue
+            if ":" not in body:
+                continue
+            key, _, value = body.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if value:
+                record["fields"][key] = value
+                current_list_key = None
+            else:
+                record["fields"][key] = []
+                current_list_key = key
+        records.append(record)
+    return records
+
+
+def run_dmidecode(binary, dmi_type, errors):
+    if binary is None:
+        errors.append("dmidecode is not installed, so DMI type %d was not read" % dmi_type)
+        return []
+    try:
+        completed = subprocess.run(
+            [binary, "-t", str(dmi_type)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=DMIDECODE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append("dmidecode -t %d could not be run: %s" % (dmi_type, exc))
+        return []
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        errors.append(
+            "dmidecode -t %d exited %d: %s" % (dmi_type, completed.returncode, detail)
+        )
+        return []
+    text = completed.stdout.decode("utf-8", "replace")
+    try:
+        return parse_dmidecode(text)
+    except Exception as exc:  # a malformed table must not take the helper down
+        errors.append("dmidecode -t %d output could not be parsed: %s" % (dmi_type, exc))
+        return []
+
+
+def read_serials(errors):
+    serials = {}
+    for name in SERIAL_FILES:
+        path = "/sys/class/dmi/id/" + name
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                value = handle.read().strip()
+        except OSError as exc:
+            errors.append("%s could not be read: %s" % (path, exc.strerror or exc))
+            continue
+        if value:
+            serials[name] = value
+    return serials
+
+
+_FIRMWARE_LINE = re.compile(
+    r"^(?P<block>.+?)\s+feature version:\s*(?P<feature>\S+?),\s*"
+    r"firmware version:\s*(?P<firmware>\S+)\s*$"
+)
+_VBIOS_LINE = re.compile(r"^VBIOS version:\s*(?P<value>.+?)\s*$", re.IGNORECASE)
+
+
+def parse_amdgpu_firmware(text):
+    """Pull the firmware table and the VBIOS string out of the debugfs file.
+
+    Most lines read ``ME feature version: 39, firmware version: 0x0000004e``.
+    The last line carries the VBIOS part number, which is the field people
+    actually want, and which has no other interface at all.
+    """
+    firmware = {}
+    vbios = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        vbios_match = _VBIOS_LINE.match(line)
+        if vbios_match:
+            vbios = vbios_match.group("value")
+            continue
+        entry = _FIRMWARE_LINE.match(line)
+        if entry:
+            firmware[entry.group("block").strip()] = {
+                "feature": entry.group("feature"),
+                "firmware": entry.group("firmware"),
+            }
+    return vbios, firmware
+
+
+def read_gpu_firmware(errors):
+    """One entry per DRM card that has an amdgpu debugfs node.
+
+    Keyed by the card's debugfs index as a string, because JSON object keys
+    are strings and the caller matches on the same index.
+    """
+    result = {}
+    paths = sorted(glob.glob("/sys/kernel/debug/dri/*/amdgpu_firmware_info"))
+    if not paths:
+        # Not an error. It is the ordinary state on Intel and NVIDIA, and on
+        # a kernel built without debugfs.
+        return result
+    for path in paths:
+        index = os.path.basename(os.path.dirname(path))
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError as exc:
+            errors.append("%s could not be read: %s" % (path, exc.strerror or exc))
+            continue
+        try:
+            vbios, firmware = parse_amdgpu_firmware(text)
+        except Exception as exc:
+            errors.append("%s could not be parsed: %s" % (path, exc))
+            continue
+        result[index] = {"vbios_version": vbios, "firmware": firmware}
+    return result
+
+
+def collect():
+    errors = []
+    binary = find_dmidecode()
+    payload = {
+        "version": SCHEMA_VERSION,
+        "dmi": {
+            "type16": run_dmidecode(binary, 16, errors),
+            "type17": run_dmidecode(binary, 17, errors),
+            "serials": read_serials(errors),
+        },
+        "gpu_firmware": read_gpu_firmware(errors),
+        "errors": errors,
+    }
+    return payload
+
+
+def main():
+    if os.geteuid() != 0:
+        # Still emit a well-formed object. Run unprivileged for a smoke test
+        # and the shape is right even though the content is empty.
+        payload = collect()
+        payload["errors"].insert(
+            0, "koken-helper is not running as root, so most of this is empty"
+        )
+    else:
+        payload = collect()
+    json.dump(payload, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a genuine crash, and the only non-zero exit
+        sys.stderr.write("koken-helper failed: %s\n" % exc)
+        sys.exit(1)
