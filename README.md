@@ -299,7 +299,7 @@ information to open its explanation.
 | Section | What is in it |
 |---|---|
 | **Hardware** | Your processor - cores, threads, clock speeds, cache, what instructions it supports, and which known processor flaws affect it. Your memory - how much, how fast, which slots are filled, and how many channels are actually in use. Your graphics cards, each one on its own tab. Your monitors, including when each was manufactured. Your motherboard and its firmware. |
-| **System** | Which Linux distribution this is and which version. Which kernel, which flavour of it, and every setting it was started with. Your desktop session. And a security page: Secure Boot, kernel lockdown, device isolation, and the protections your kernel has switched on. |
+| **System** | Which Linux distribution this is and which version, every package installed on it and whether you asked for it or something else pulled it in, and which program opens which kind of file. Which kernel, which flavour of it, and every setting it was started with. Your desktop session, which graphical toolkit each installed application is built on, and which portal backend handles each request your desktop makes. And a security page: Secure Boot, kernel lockdown, device isolation, and the protections your kernel has switched on. |
 | **Storage** | Every drive, with its model, serial number, and its own health report - including how many hours it has been running. Every partition, with what is on it, how full it is, and where it is attached. A SMART page carrying each drive's full attribute table, one row per counter the drive keeps, with the ones that predict a failure picked out. Everything currently mounted, and your swap space. |
 | **Peripherals** | Everything plugged in: USB devices, everything on the internal PCI bus, network connections with their speed and traffic counters, sound cards, keyboards and mice, batteries and power, and every temperature and fan sensor the machine has. |
 
@@ -332,8 +332,9 @@ change - temperatures, clock speeds, free space. `Off`, or every 1, 2, 5 or 10
 seconds. It starts at 2 seconds, and remembers your choice.
 
 Things that do not change on their own - which devices exist, model numbers,
-capacities - are only re-read when you press `F5`. So if you plug something in
-while KÖKEN is open, press `F5` to see it.
+capacities - are only re-read when you ask. The **Refresh** button at the
+bottom left does that, and so does `F5`. So if you plug a drive in while KÖKEN
+is open, press Refresh to see it.
 
 ### The password prompt
 
@@ -440,8 +441,8 @@ and pass it on. If you pass on a changed version, it has to come with its
 source and under the same licence, so that whoever gets it has the same freedom
 you did.
 
-The full text is in `LICENSE`, and inside the program under
-**System → Operating system → About**.
+The full text is in `LICENSE`, and inside the program behind the **About**
+button in the footer.
 
 The icon font inside the program is Tabler Icons, under the MIT licence, in
 `LICENSE-tabler`.

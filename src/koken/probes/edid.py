@@ -94,17 +94,26 @@ DISPLAYID_TIMING_BLOCKS = {
         0x11: "DisplayID Type V timing block",
         0x13: "DisplayID Type VI timing block",
     },
-    2: {
-        0x03: "DisplayID Type VIII timing block",
-        0x04: "DisplayID Type IX timing block",
-        0x0A: "DisplayID Type X timing block",
-    },
+    # DisplayID 2.0 renumbered its data blocks into the 0x20s, and the only two
+    # tags in that range confirmed here against the kernel's own header are
+    # 0x03 (Type I, 1.x) and 0x22 (Type VII), both of which are decoded below.
+    # The rest were guessed once and the guesses were wrong, so nothing is
+    # asserted about them: an unrecognised block is reported by its tag number
+    # rather than given a name this parser cannot stand behind.
+    2: {},
 }
 
-# The detailed timing block, per DisplayID major version: DisplayID 1.x calls
-# it Type I and DisplayID 2.0 calls it Type VII. The twenty bytes are laid out
-# identically; only the pixel clock unit differs, 10 kHz against 1 kHz.
-DISPLAYID_DETAILED = {1: (0x03, 10), 2: (0x02, 1)}
+# The detailed timing block. DisplayID 1.x calls it Type I and tags it 0x03;
+# DisplayID 2.0 calls it Type VII and tags it 0x22. The twenty bytes are laid
+# out identically and only the pixel clock unit differs, 10 kHz against 1 kHz,
+# so the tag alone decides both which blocks to read and how to read them.
+#
+# Keyed by tag rather than by the block's declared major version, because that
+# is what the kernel does - drm_edid.c dispatches on the tag and derives the
+# unit from it (`type_7 = block->tag == DATA_BLOCK_2_TYPE_7_DETAILED_TIMING`),
+# never consulting the version. A display that declares one version and carries
+# the other's timing block is therefore read correctly rather than skipped.
+DISPLAYID_DETAILED_TAGS = {0x03: 10, 0x22: 1}
 
 # Named here rather than in a comment because the display probe shows this list
 # on screen when one of these blocks turns up. Each of these encodes timings in
@@ -972,15 +981,18 @@ def _parse_displayid(block: bytes, edid: Edid) -> str:
         )
         return name
 
-    detailed = DISPLAYID_DETAILED.get(major)
-    if detailed is None:
-        edid.extension_notes.append(
-            f"{name}: this parser knows DisplayID 1.x and 2.0, so the timings in "
-            "this block were not read."
-        )
-        return name
-    detailed_tag, khz_per_unit = detailed
     undecodable = DISPLAYID_TIMING_BLOCKS.get(major, {})
+    if major not in DISPLAYID_TIMING_BLOCKS:
+        # Still parsed, not abandoned: the timing block tags are what decide how
+        # to read a descriptor, and the kernel dispatches on them without
+        # consulting the version at all. But a version this parser has never
+        # seen is worth saying out loud, because anything it numbers differently
+        # will pass by unread.
+        edid.extension_notes.append(
+            f"{name}: this parser knows DisplayID 1.x and 2.0, and this block "
+            f"declares version {major}. Its detailed timings were read if they "
+            "use a tag this parser recognises; anything else in it was not."
+        )
 
     payload = block[5 : 5 + size]
     offset = 0
@@ -994,7 +1006,8 @@ def _parse_displayid(block: bytes, edid: Edid) -> str:
         data = payload[offset + 3 : offset + 3 + length]
         if len(data) < length:
             break  # a block that runs past the section it lives in
-        if tag == detailed_tag:
+        if tag in DISPLAYID_DETAILED_TAGS:
+            khz_per_unit = DISPLAYID_DETAILED_TAGS[tag]
             for index in range(length // DISPLAYID_DESCRIPTOR):
                 base = index * DISPLAYID_DESCRIPTOR
                 timing = _displayid_timing(
@@ -1004,6 +1017,15 @@ def _parse_displayid(block: bytes, edid: Edid) -> str:
                     edid.displayid_detailed.append(timing)
         elif tag in undecodable:
             text = undecodable[tag]
+            if text not in edid.undecoded:
+                edid.undecoded.append(text)
+        elif 0x20 <= tag <= 0x2F:
+            # DisplayID 2.0 numbers its own data blocks in this range - the one
+            # tag confirmed here against the kernel, Type VII's 0x22, sits in
+            # it. Anything else in the range is reported by number, because
+            # naming it would mean asserting a mapping this parser has not
+            # verified, and a wrong name is worse than an honest tag.
+            text = f"DisplayID 2.0 data block, tag 0x{tag:02x}, not decoded"
             if text not in edid.undecoded:
                 edid.undecoded.append(text)
         offset += 3 + length
