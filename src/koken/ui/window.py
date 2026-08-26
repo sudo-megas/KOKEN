@@ -574,8 +574,10 @@ class Window(QMainWindow):
         if self._refreshing:
             return
         self._refreshing = True
-        self.footer.set_refreshing(True)
+        # The cursor first, so the pointer is already saying "working" by the
+        # time the button repaints itself as busy.
         QGuiApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        self.footer.set_refreshing(True)
         try:
             self.refresh_requested.emit()
         finally:

@@ -16,7 +16,7 @@ DISPLAY_NAME = "KÖKEN"
 SUBTITLE = "Machine Corpus"
 VERSION = "1.0"
 RELEASE_DATE = "2026-08-26"
-MAKER = "Megas"
+MAKER = "sudo-megas"
 SOURCE = "github.com/sudo-megas/KOKEN"
 SPDX = "GPL-3.0-or-later"
 
