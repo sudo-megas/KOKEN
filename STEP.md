@@ -554,10 +554,37 @@ git push origin v1.0
 Rewrite this section as work proceeds. Keep it short — what is done, what changed
 from the plan, and what is next.
 
-**Done.** All of §3, items 1 to 26. 22 probe modules, the three tab rows, the
-content row, the theme, the explanation corpus (72 entries), both packages and
-the release workflow. §5 checks 1 to 27 all pass; the five mount checks were run
-against the stub call layer §7.8 asks for, not against a live udisks2.
+**Done.** All of §3, items 1 to 26, then an audit of the finished tree and a
+pass fixing everything it found. 22 probe modules, the three tab rows, the
+content row, the theme, the explanation corpus (88 entries), both packages and
+the release workflow.
+
+§5 checks 1 to 27 pass, under a session bus and with input delivered as real
+events. Both of those qualifications matter, because the first time this
+section was run neither was true and the result was wrong:
+
+- **Under a session bus.** `theme.watch()` asked `QDBusConnection` to connect a
+  portal signal to a plain Python object with a byte string for a slot name.
+  Where there is no session bus that code returns before it can fail. Where
+  there is one - every desktop this will ever run on - it is a hard crash
+  before the window appears. The first pass ran in a container with no bus and
+  reported the application starting correctly. Everything now runs under
+  `dbus-run-session`.
+- **With real input.** Checks 15 and 18 to 20 called `click()` on the widget,
+  which invokes the handler directly and never asks Qt what is under the
+  pointer. Hit testing is the layer that was broken: the row header was marked
+  transparent for mouse events, and Qt's `childAt()` skips a transparent widget
+  without descending into its children, so neither the mount button nor the
+  copy control could be reached by an actual mouse. The copy control was also
+  laid out 22 pixels wide by zero high. Both passed the first time. Every
+  press now goes through `QTest.mouseClick` on the window handle, and asserts
+  first that Qt finds the intended widget under that point.
+
+The five mount checks run against the stub call layer §7.8 asks for, not
+against a live udisks2. Alongside them: a reproducer for the mount row being
+destroyed by the re-enumeration its own success triggers, one for an LVM root
+and a LUKS swap on a machine with no udisks2, one for the two-phase pkexec
+timeout, and twelve start-to-quit cycles checked for a clean exit status.
 
 **Changed from the plan.**
 
@@ -575,13 +602,29 @@ against the stub call layer §7.8 asks for, not against a live udisks2.
 - `chip` does not exist in Tabler 3.46.0. `CORE.md` §13.5 names it for the
   generic PCI concept with no fallback, and also says an unmatched concept gets
   no icon rather than an approximation, so generic PCI tabs carry none. Every
-  other candidate name verified and is in the subset: 30 glyphs, 14 kB.
+  other candidate name verified and is in the subset: 30 glyphs, 16 kB - the
+  extra two kilobytes are the copyright, licence and licence-URL name records,
+  which the upstream webfont build does not emit and which are set explicitly so
+  the MIT notice travels inside the file.
 - `license-files` was removed from `pyproject.toml`. The PEP 639 list form is
   rejected by the hatchling in Debian trixie, which is what the `.deb` is built
   with. Hatchling finds both licence files on its own; the built wheel carries
   them.
 - Package sizes for the README badges were measured by building the `.deb`
   here (445 KiB) and compressing the same payload the Arch way (480 KiB).
+- Check 24 is written as `grep -rn "requests\|urllib\|http\|socket\|urlopen"`
+  returning nothing. It cannot: it matches thirteen lines, every one of them
+  prose or an unrelated identifier - CPU *sockets*, the Wayland *socket* path,
+  "orders requests before sending them to the drive". The property it is after
+  is checked as an import-graph property instead, over all 40 source files. No
+  network module is imported anywhere and no Qt network class is named.
+- The polkit prompt was given two minutes rather than ten seconds. §7 sets one
+  timeout for the whole `pkexec` run, which covers a person reading an
+  authentication prompt they have never seen before. Ten seconds for that is a
+  way of cancelling on a slow typist and then blaming the helper. The helper
+  writes one line to stderr the moment it starts, which is the only point at
+  which the two halves can be told apart: two minutes to answer, twenty seconds
+  for the bounded work that follows.
 
 **Next.** Nothing in §3. The remaining work is §8: the user creates the empty
 GitHub repository, pushes `main` and the `v1.0` tag, and the workflow builds and
