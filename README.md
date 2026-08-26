@@ -1,14 +1,20 @@
-![KÖKEN](data/banner.png)
+<p align="center" width="100%">
+    <img width="100%" src="data/banner.png">
+</p>
 
-# KÖKEN
+<h1 align="center">KÖKEN</h1>
+<p align="center"><strong>Machine Corpus</strong></p>
 
-![Version](https://img.shields.io/badge/version-1.0-89b4fa?style=flat-square)
-![Released](https://img.shields.io/badge/released-2026--08--26-a6adc8?style=flat-square)
-![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-a6e3a1?style=flat-square)
-![Arch package](https://img.shields.io/badge/Arch_package-~480_KiB-1793d1?style=flat-square&logo=archlinux&logoColor=white)
-![Debian package](https://img.shields.io/badge/Debian_package-~445_KiB-a80030?style=flat-square&logo=debian&logoColor=white)
+<p align="center">
+  <img alt="Arch Linux package" src="https://img.shields.io/badge/Arch%20Linux-926%20KB-1793D1?style=for-the-badge&logo=archlinux&logoColor=white">
+  <img alt="Debian package"     src="https://img.shields.io/badge/Debian-536%20KB-A80030?style=for-the-badge&logo=debian&logoColor=white">
+</p>
 
-**Machine Corpus**
+<p align="center">
+  <img alt="Version"           src="https://img.shields.io/badge/version-v1.0-75ACFD?style=for-the-badge">
+  <img alt="Release date"      src="https://img.shields.io/badge/released-2026--08--27-BD88E0?style=for-the-badge">
+  <img alt="Licence"           src="https://img.shields.io/badge/licence-GPL--3.0--or--later-07234D?style=for-the-badge">
+</p>
 
 ---
 
