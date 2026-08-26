@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=KÖKEN
+GenericName=Machine Corpus
+Comment=See what this machine is made of, and what each value means
+Exec=koken
+TryExec=koken
+Icon=koken
+Terminal=false
+Categories=System;Monitor;HardwareSettings;
+Keywords=hardware;system;sysfs;pci;usb;smart;memory;sensors;
+StartupNotify=true
+StartupWMClass=koken

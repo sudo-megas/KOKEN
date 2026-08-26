@@ -1,0 +1,77 @@
+# KOKEN - Machine Corpus
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Maintainer: Megas
+#
+# This is a repository-local PKGBUILD, not an AUR one. `source` is empty and
+# the build happens from the checkout it sits in, so there is no tarball to
+# fetch and no checksum to keep in step with the source.
+#
+# makepkg runs with $startdir set to the directory holding this file, which is
+# packaging/, so the project root is one level up. debian/ cannot join it here:
+# dpkg-buildpackage requires that directory at the repository root and offers
+# no way to relocate it. The asymmetry is deliberate.
+
+pkgname=koken
+pkgver=1.0
+pkgrel=1
+pkgdesc="Machine Corpus - a hardware and system browser that explains what each value means"
+arch=('any')
+url="https://github.com/sudo-megas/KOKEN"
+license=('GPL-3.0-or-later')
+depends=('python' 'python-pyside6' 'hwdata' 'udisks2' 'dmidecode' 'polkit')
+makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel' 'imagemagick')
+source=()
+sha256sums=()
+
+_root="$startdir/.."
+
+build() {
+  cd "$_root"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$_root"
+
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # The privileged helper. The path is fixed: the polkit action names it
+  # exactly, and pkexec refuses to run anything the action does not name.
+  install -Dm0755 -o root -g root helper/koken-helper \
+    "$pkgdir/usr/lib/koken/koken-helper"
+
+  install -Dm0644 data/com.github.sudo_megas.koken.policy \
+    "$pkgdir/usr/share/polkit-1/actions/com.github.sudo_megas.koken.policy"
+
+  install -Dm0644 data/koken.desktop \
+    "$pkgdir/usr/share/applications/koken.desktop"
+
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/koken/LICENSE"
+  install -Dm0644 LICENSE-tabler "$pkgdir/usr/share/licenses/koken/LICENSE-tabler"
+
+  # The supplied artwork is a single 2048px PNG with its corner rounding
+  # already baked in. Scale it down; do not mask, frame or reshape it.
+  local _magick
+  if command -v magick >/dev/null 2>&1; then
+    _magick="magick"
+  else
+    _magick="convert"
+  fi
+  local _size
+  for _size in 512 256 128 64 48 32; do
+    install -d "$pkgdir/usr/share/icons/hicolor/${_size}x${_size}/apps"
+    "$_magick" data/icons/koken.png \
+      -filter Lanczos -resize "${_size}x${_size}" \
+      -strip \
+      "$pkgdir/usr/share/icons/hicolor/${_size}x${_size}/apps/koken.png"
+  done
+
+  # The explanation corpus and the palettes are package data inside the Python
+  # module and are deliberately not installed to a system path. The application
+  # seeds them into the user's config directory on first run.
+}

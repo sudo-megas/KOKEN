@@ -1,0 +1,40 @@
+Source: koken
+Section: utils
+Priority: optional
+Maintainer: Megas <noreply@github.com>
+Build-Depends: debhelper (>= 13),
+               dh-python,
+               python3-all,
+               python3-hatchling,
+               python3-build,
+               python3-installer,
+               imagemagick
+Standards-Version: 4.6.2
+Homepage: https://github.com/sudo-megas/KOKEN
+Rules-Requires-Root: no
+
+Package: koken
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3 (>= 3.11),
+         python3-pyside6.qtcore,
+         python3-pyside6.qtgui,
+         python3-pyside6.qtwidgets,
+         python3-pyside6.qtdbus,
+         hwdata,
+         udisks2,
+         dmidecode,
+         policykit-1
+Description: Machine Corpus - a hardware and system browser that explains itself
+ KOKEN reads what this machine is made of and says, in plain language, what
+ each value means and why it might matter. It is offline and read-only: it
+ opens no network connection of any kind.
+ .
+ Every row carries an explanation you can open in place, covering the values
+ people actually stop and look at - PCIe link width, memory channel
+ configuration, SMART health, battery wear, processor vulnerability status,
+ Secure Boot and kernel lockdown.
+ .
+ Debian ships PySide6 split into one binary package per Qt module, which is why
+ four of them are named here rather than one. That is expected, not a mistake.

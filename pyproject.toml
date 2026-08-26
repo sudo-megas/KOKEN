@@ -13,8 +13,11 @@ version = "1.0"
 description = "Machine Corpus - a hardware and system browser that explains what each value means"
 readme = "README.md"
 requires-python = ">=3.11"
+# The SPDX identifier, and only that. `license-files` is deliberately absent:
+# the PEP 639 list form is rejected by the hatchling in Debian trixie, which is
+# what the .deb is built with, and hatchling finds LICENSE and LICENSE-tabler
+# by its own default patterns anyway.
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE", "LICENSE-tabler"]
 authors = [{ name = "Megas" }]
 keywords = ["hardware", "sysfs", "system-information", "linux", "qt"]
 classifiers = [

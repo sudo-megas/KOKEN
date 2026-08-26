@@ -1,0 +1,134 @@
+# KOKEN - Machine Corpus
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Builds both packages and publishes them when a v* tag is pushed. Nothing
+# here runs during development; it runs on GitHub, after the tag.
+#
+# Container images are pinned by tag rather than by digest, on purpose. A digest
+# pin means this workflow stops working the day the image is rebuilt, which for
+# a rolling base image is measured in weeks, and the failure would arrive at
+# release time.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  arch:
+    name: Arch package
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git python python-build python-installer python-hatchling \
+            python-wheel imagemagick
+
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root and there is no flag to make it. A
+      # build user, owning the workspace, is the only way through.
+      - name: Create a build user
+        run: |
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' >> /etc/sudoers
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      # From inside packaging/, because that is where the PKGBUILD lives and
+      # makepkg takes $startdir from the directory it is run in.
+      - name: Build
+        run: sudo -u builder makepkg -s --noconfirm
+        working-directory: packaging
+
+      - name: Show what was built
+        run: ls -la packaging/*.pkg.tar.zst
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: packaging/*.pkg.tar.zst
+          if-no-files-found: error
+
+  debian:
+    name: Debian package
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates devscripts debhelper dh-python \
+            python3-all python3-build python3-installer python3-hatchling \
+            imagemagick
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: dpkg-buildpackage -us -uc -b
+
+      # dpkg-buildpackage writes the .deb one level above the source tree.
+      - name: Collect the package
+        run: |
+          mkdir -p artifacts
+          mv ../koken_*_all.deb artifacts/
+          ls -la artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: artifacts/*.deb
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [arch, debian]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect the packages
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.pkg.tar.zst' -o -name '*.deb' \) \
+            -exec mv {} release/ \;
+          ls -la release
+
+      # The release body is the tag's own message, so what is written on the
+      # tag is what appears on the release. generate_release_notes is off:
+      # a commit list is not a release note.
+      - name: Take the release body from the tag message
+        id: body
+        run: |
+          git fetch --force --tags
+          {
+            echo 'text<<KOKEN_TAG_MESSAGE'
+            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}"
+            echo 'KOKEN_TAG_MESSAGE'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body: ${{ steps.body.outputs.text }}
+          generate_release_notes: false
+          fail_on_unmatched_files: true

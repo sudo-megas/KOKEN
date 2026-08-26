@@ -1,0 +1,8 @@
+# Everything that is not the Python module itself, at the same paths the Arch
+# package uses, so the two distributions behave identically.
+#
+# The explanation corpus and the palettes are not here on purpose: they are
+# package data inside the Python module, and the application seeds them into
+# the user's own config directory on first run.
+data/com.github.sudo_megas.koken.policy  usr/share/polkit-1/actions
+data/koken.desktop                       usr/share/applications
