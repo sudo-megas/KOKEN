@@ -927,6 +927,81 @@ interactive work responsive while something large runs in the background, and
 is a good choice on a mechanical drive and a debatable one on a fast NVMe.
 """
 
+# ---- SMART -----------------------------------------------------------------
+
+[storage.smart.status]
+long = """
+Whether the drive's own attribute table could be read, and where it came from.
+
+There are two routes and they answer different questions. udisks2 gives the
+verdict - failing or not - and that is what the Disks tab shows. The table
+itself has to come from smartctl, because udisks2 returns it in a shape this Qt
+binding cannot unpack at all. If smartctl is not installed you lose this tab and
+nothing else; every row on Disks is unaffected.
+
+A drive that was asleep is left asleep. Reading SMART would spin it up, and
+spinning a disk up because somebody opened a browser is not a trade worth
+making - come back after the drive has been used for something.
+"""
+
+[storage.smart.attribute]
+short = "the drive's own counter"
+long = """
+One counter the drive keeps about itself.
+
+Four numbers, and the useful one is not the raw count. `Value` is the drive's
+own normalised score, usually starting near 100 and falling as the attribute
+worsens. `Worst` is the lowest that score has ever been. `Threshold` is the
+score the manufacturer says means failure - so the attribute has failed when
+value falls to threshold, and that is the comparison this application makes,
+using the drive's own published number rather than one invented here. `Raw` is
+the underlying count, and its meaning is vendor-specific: the same attribute id
+can be a sector count on one drive and a temperature in another's encoding.
+
+The ones worth knowing by name are reallocated sectors, pending sectors and
+uncorrectable errors. A drive that has reallocated a few sectors is doing its
+job; one whose count is climbing between readings is failing, and the trend
+matters far more than the number. Pending sectors are worse than reallocated
+ones: the drive has found a sector it cannot read and has not yet been able to
+move it.
+"""
+
+[storage.smart.nvme_log]
+long = """
+NVMe drives keep a health log rather than the numbered attribute table ATA
+drives use, so this is the same idea in a different shape.
+
+`Percentage used` is an estimate of rated endurance consumed, and it is allowed
+to exceed 100 - a drive at 110% is past its warranty model, not dead.
+`Available spare` is the reserve of replacement blocks left, judged against the
+threshold the drive itself publishes. `Media errors` counts data the controller
+could not recover; anything other than zero deserves attention. `Critical
+warning` is the drive raising its hand, and it is the one to act on.
+"""
+
+[storage.smart.why]
+long = """
+Why there is no table here, spelled out rather than left as an absence.
+
+The cases are genuinely different and need different responses. smartmontools
+not installed is a package away. A drive behind a USB bridge usually cannot pass
+SMART through at all, because most bridge chips do not implement the
+pass-through command - that is the enclosure's limitation, not the drive's, and
+the same drive connected directly will report normally. A drive that was asleep
+was deliberately left alone. And a read that needed administrator access and did
+not get it will work on the next launch if the prompt is accepted.
+"""
+
+[storage.smart.absent]
+long = """
+This drive publishes no SMART data at all.
+
+Common and usually uninteresting: virtual disks in a virtual machine, memory
+cards, the block devices a container or a loop mount presents. There is no
+physical medium keeping counters, so there is nothing to report and nothing
+wrong.
+"""
+
 # ---- Volumes -------------------------------------------------------------
 
 [storage.volumes.mount_state]

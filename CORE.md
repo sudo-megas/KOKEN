@@ -56,8 +56,12 @@ These are absolute. Violating any of them is a build failure.
    feature writes anything and is not literally `Filesystem.Mount` or
    `Filesystem.Unmount`, the answer is no.
 4. **No shelling out to `lspci`, `lsusb`, `lshw`, `hwinfo` or `inxi`** and scraping
-   their text. Read sysfs directly. The one permitted exception is `dmidecode`,
-   invoked by the privileged helper, because the DMI table has no other interface.
+   their text. Read sysfs directly. Exactly two commands are permitted, both only
+   inside the privileged helper and nowhere else in the application: `dmidecode`,
+   because the DMI table has no other interface; and `smartctl`, because the
+   per-attribute SMART table has no other interface this Qt binding can read.
+   Neither is required for the application to run, and adding a third needs an
+   amendment to this document.
 5. **No AI attribution anywhere.** No `Co-Authored-By` trailers, no
    `Generated with` lines, no mention in commits, README, About page or release
    notes. This is the standing rule for this repository.
@@ -84,7 +88,17 @@ Explicitly **not** dependencies:
 
 - `python-dbus` / `dbus-python` — PySide6 ships `QtDBus`.
 - `pciutils` / `usbutils` — we read sysfs, we do not scrape `lspci`.
-- `smartmontools` — udisks2 covers it.
+- `smartmontools` — **optional, not required.** udisks2 covers the SMART health
+  verdict, temperature, power-on hours and bad-sector count, and those rows come
+  from it whether or not smartmontools is installed. It does not cover the
+  per-attribute table: `SmartGetAttributes` returns `a(ysqiiixia{sv})` for ATA and
+  `a{sv}` for NVMe, and both arrive as a `QDBusArgument` that PySide6 cannot read —
+  its extraction operator aborts the process. The table therefore comes from
+  `smartctl --json` inside the privileged helper when it is installed, and the SMART
+  tab says so plainly when it is not. Declared `optdepends` on Arch and `Suggests`
+  on Debian, deliberately not `Recommends`: apt installs Recommends by default and
+  Debian's smartmontools brings `smartd`, a monitoring daemon that starts at boot
+  and mails root. A read-only browser does not get to make that change to a machine.
 - Any theming, icon or widget library — Qt's own palette handling is enough.
 
 ---
