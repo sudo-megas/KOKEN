@@ -41,8 +41,13 @@ class FlowLayout(QLayout):
         self.setContentsMargins(QMargins(margin, margin, margin, margin))
 
     def __del__(self) -> None:
+        # Drop every item's reference. The Qt example deletes the returned
+        # QLayoutItem here; in Python letting the last reference go is the
+        # same thing, and holding them would keep the widgets alive past the
+        # layout that owned them.
         while self.count():
-            self.takeAt(0)
+            item = self.takeAt(0)
+            del item
 
     # -- QLayout ----------------------------------------------------------
 

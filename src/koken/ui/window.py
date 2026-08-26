@@ -69,7 +69,12 @@ class Window(QMainWindow):
         self._enumeration: dict[str, list] = {}
         # {branch id: (probe id, section id)} - the whole of "remembered per branch".
         self._selection: dict[str, tuple[str, str]] = {}
-        self._rows: dict[str, ContentRow] = {}
+        # Every content row currently on screen, in order. A list rather than
+        # a dictionary because a row key may legitimately repeat within a
+        # section, and a dictionary would silently drop all but the last -
+        # leaving an orphan in the layout that is never resized and never
+        # sampled.
+        self._row_widgets: list[ContentRow] = []
         self._current_branch: str | None = None
         self._mount_row_factory = None
 
@@ -149,12 +154,16 @@ class Window(QMainWindow):
         """
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            if key == Qt.Key.Key_Tab:
-                self.row2.move(1)
-                return True
-            if key == Qt.Key.Key_Backtab:
-                self.row2.move(-1)
-                return True
+            # Plain Tab and Shift+Tab only. Ctrl+Tab and friends belong to
+            # whatever the desktop has bound them to, not to row 2.
+            modifiers = event.modifiers() & ~Qt.KeyboardModifier.ShiftModifier
+            if modifiers == Qt.KeyboardModifier.NoModifier:
+                if key == Qt.Key.Key_Tab:
+                    self.row2.move(1)
+                    return True
+                if key == Qt.Key.Key_Backtab:
+                    self.row2.move(-1)
+                    return True
         return super().event(event)
 
     # -- data --------------------------------------------------------------
@@ -299,7 +308,7 @@ class Window(QMainWindow):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-        self._rows = {}
+        self._row_widgets = []
 
         label_width = self._label_width()
 
@@ -318,8 +327,9 @@ class Window(QMainWindow):
             widget = self._mount_row_factory(section, first, odd=False)
             if widget is not None:
                 widget.set_label_width(label_width)
+                widget.toggled_expansion.connect(self._apply_label_widths)
                 self.content_layout.insertWidget(self.content_layout.count() - 1, widget)
-                self._rows[first.key] = widget
+                self._row_widgets.append(widget)
                 rows = rest
                 offset = 1
             else:
@@ -338,10 +348,14 @@ class Window(QMainWindow):
                 raw_value=row.value,
                 body=body,
                 odd=bool((index + offset) % 2),
+                row_key=row.key,
             )
             widget.set_label_width(label_width)
+            # Expanding a row can bring the scrollbar in, which narrows the
+            # viewport - and the label column is a share of that width.
+            widget.toggled_expansion.connect(self._apply_label_widths)
             self.content_layout.insertWidget(self.content_layout.count() - 1, widget)
-            self._rows[row.key] = widget
+            self._row_widgets.append(widget)
 
         self.scroll.verticalScrollBar().setValue(0)
 
@@ -370,8 +384,22 @@ class Window(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
+        self._apply_label_widths()
+
+    def content_rows(self) -> list[ContentRow]:
+        """Every content row currently on screen, in the order shown."""
+        return list(self._row_widgets)
+
+    def row_for(self, key: str) -> ContentRow | None:
+        """The first row carrying *key*, or None."""
+        for widget in self._row_widgets:
+            if widget.row_key == key:
+                return widget
+        return None
+
+    def _apply_label_widths(self) -> None:
         width = self._label_width()
-        for widget in self._rows.values():
+        for widget in self._row_widgets:
             widget.set_label_width(width)
 
     # -- the volatile pass -------------------------------------------------
@@ -380,14 +408,19 @@ class Window(QMainWindow):
         """Update the rows on screen in place. Never rebuilds anything."""
         probe = self.current_probe()
         section_id = self.current_section_id()
-        if probe is None or section_id is None or not self._rows:
+        if probe is None or section_id is None or not self._row_widgets:
             return
         sample = probe.safe_sample().get(section_id, [])
+        if not sample:
+            return
+        by_key: dict[str, list[ContentRow]] = {}
+        for widget in self._row_widgets:
+            by_key.setdefault(widget.row_key, []).append(widget)
         for row in sample:
-            widget = self._rows.get(row.key)
-            if widget is None:
-                continue
-            widget.set_value(self._glossed(row), row.severity, raw_value=row.value)
+            for widget in by_key.get(row.key, ()):
+                widget.set_value(
+                    self._glossed(row), row.severity, raw_value=row.value
+                )
 
     def apply_interval(self, seconds: int) -> None:
         self.footer.set_interval(seconds)
