@@ -141,7 +141,7 @@ per device, and therefore vary per machine. All others are fixed.
 |---|---|
 | Operating system | Overview · Distribution · Init |
 | Kernel | Overview · Command line · Modules |
-| Desktop | Overview · Session |
+| Desktop | Overview · Session · Toolkits |
 | Security | Overview |
 
 ### 6.3 Storage
