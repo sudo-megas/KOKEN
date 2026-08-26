@@ -27,6 +27,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
+        # The tag name alone, not a ref. It is expanded to refs/tags/<name>
+        # wherever it is checked out: handing actions/checkout a bare name makes
+        # it guess between a branch and a tag, and the wildcard fetch that
+        # follows matches nothing and fails with no message at all when the tag
+        # is absent. A full ref fails with "couldn't find remote ref", which
+        # says what is wrong.
         description: "Tag to build and publish, for example v1.0"
         required: true
         default: "v1.0"
@@ -53,7 +59,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       # makepkg refuses to run as root and there is no flag to make it. A
       # build user, owning the workspace, is the only way through.
@@ -94,7 +100,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Build
         run: dpkg-buildpackage -us -uc -b
@@ -122,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - uses: actions/download-artifact@v4
         with:
