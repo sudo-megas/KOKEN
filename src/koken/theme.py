@@ -516,14 +516,23 @@ def _relative_luminance(value: str) -> float:
 
 
 def _readable_on(background: str, colors: dict[str, str]) -> str:
-    """Whichever of base and text reads on *background*.
+    """Whichever of base and text stands furthest from *background*.
 
-    Needed because accent is a palette colour and the text sitting on it has to
-    stay legible in both a light and a dark palette, without either being
-    written down here.
+    Needed because accent and warning are palette colours, and the text sitting
+    on them has to stay legible in both a light and a dark palette without
+    either colour being written down here. Comparing luminance against a fixed
+    threshold does not work: in a dark palette both the light accent and the
+    light text are above any threshold you pick, and the result is light text
+    on a light fill. Comparing the two candidates against the background
+    instead always picks the one that can actually be read.
     """
-    light = _relative_luminance(background) > 0.55
-    return colors["base"] if not light else colors["text"]
+    background_luminance = _relative_luminance(background)
+    return max(
+        (colors["base"], colors["text"]),
+        key=lambda candidate: abs(
+            _relative_luminance(candidate) - background_luminance
+        ),
+    )
 
 
 def build_stylesheet(colors: dict[str, str], base_point_size: float) -> str:
