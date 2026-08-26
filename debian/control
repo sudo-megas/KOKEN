@@ -26,6 +26,7 @@ Depends: ${python3:Depends},
          udisks2,
          dmidecode,
          pkexec
+Suggests: smartmontools
 Description: Machine Corpus - a hardware and system browser that explains itself
  KOKEN reads what this machine is made of and says, in plain language, what
  each value means and why it might matter. It is offline and read-only: it
@@ -42,3 +43,15 @@ Description: Machine Corpus - a hardware and system browser that explains itself
  pkexec rather than policykit-1: the policykit-1 binary package was transitional
  in bookworm and does not exist in trixie at all. Its source package now builds
  pkexec and polkitd, and pkexec depends on polkitd, so naming pkexec brings both.
+ .
+ smartmontools is Suggests and deliberately not Recommends. Policy reserves
+ Recommends for a package that would be found alongside this one in all but
+ unusual installations, and apt installs Recommends by default - so choosing it
+ would put smartd, a monitoring daemon with a systemd unit that starts at boot
+ and mails root, onto every machine that installs a read-only browser. That is
+ a change to how the machine behaves, made on the user's behalf, to add one
+ table to one tab. Without smartmontools the Storage branch keeps its SMART
+ health verdict, temperature, power-on hours, bad sector count and self-test
+ result, all of them from udisks2 over D-Bus; what is lost is the per-attribute
+ table, which is the one thing udisks2 returns in a form the Qt binding cannot
+ read. That is an enhancement to one section, which is precisely Suggests.

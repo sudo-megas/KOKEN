@@ -22,15 +22,33 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from . import toolkits
 from .base import (
     NOT_AVAILABLE,
     NOT_REPORTED,
     Probe,
     Section,
     fmt_list,
+    natural_key,
     or_missing,
     path_exists,
     read_first_line,
+)
+
+# How many lines one expansion will carry before it says how many it left out.
+# A desktop with four hundred applications lists all four hundred; the cap is
+# there for the directory that holds five thousand.
+MAX_LISTED = 500
+
+# What each evidence source is called on the page, in the order it is tried.
+SOURCE_NAMES = (
+    ("markers", "settled by the files sitting beside the binary"),
+    ("libraries", "settled by the libraries the binary links"),
+    ("scripts", "settled by the script the entry points at"),
+    ("flatpak", "settled by Flatpak metadata"),
+    ("packages", "settled by the package database"),
+    ("unresolved", "named a command that is not installed"),
+    ("network", "sat on a network filesystem and were not visited"),
 )
 
 # Read for the Overview section, in this order.
@@ -79,7 +97,7 @@ class DesktopProbe(Probe):
     label = "Desktop"
 
     def sections(self) -> list[Section]:
-        return [self._overview(), self._session()]
+        return [self._overview(), self._session(), self._toolkits()]
 
     # -- overview ---------------------------------------------------------
 
@@ -218,6 +236,232 @@ class DesktopProbe(Probe):
         )
         return section
 
+    # -- toolkits ---------------------------------------------------------
+
+    def _toolkits(self) -> Section:
+        """What every installed application is built on, and what is installed.
+
+        One row per toolkit, not one row per application. A desktop holds
+        anywhere between five and four hundred desktop entries, and this list
+        stops being readable at about sixty rows, so the roll call lives inside
+        one row's expansion and the section itself carries the distribution -
+        which is the more useful fact in any case. Nobody wants to read four
+        hundred names; the question is what this desktop is made of. The shape
+        is the same fourteen rows on a machine with four hundred applications
+        and on one with none.
+
+        Every toolkit is listed whether or not it is installed and whether or
+        not anything uses it, the same way an absent battery is stated rather
+        than hidden. "GTK 2 is not installed" is an answer.
+        """
+        section = Section(id="toolkits", label="Toolkits")
+        try:
+            survey = toolkits.survey()
+        except Exception as exc:  # deliberately broad: a section, not a crash
+            section.add(
+                self.row(
+                    "toolkit_scan",
+                    "Applications scanned",
+                    "The installed applications could not be read on this "
+                    f"machine ({type(exc).__name__}).",
+                )
+            )
+            return section
+
+        counts = survey.counts
+        total = len(survey.applications)
+        order = sorted(toolkits.TOOLKITS, key=lambda item: (-counts[item.key], item.rank))
+
+        section.add(self._scan_row(survey, total))
+        section.add(self._mix_row(survey, counts, total))
+        for toolkit in order:
+            section.add(self._toolkit_row(toolkit, survey, counts[toolkit.key]))
+        section.add(self._list_row(survey, order, total))
+        section.add(self._unclassified_row(survey))
+        section.add(
+            self.row(
+                "toolkit_method",
+                "Detection",
+                "Read from the files on disk — nothing was started",
+            )
+        )
+        return section
+
+    def _scan_row(self, survey, total: int):
+        """Where the entries came from, how they were settled, what was missed."""
+        lines = [
+            f"{directory} — {_plural(count, 'entry', 'entries')}"
+            for directory, count in survey.directories
+        ]
+        if not lines:
+            lines.append("No applications directory exists on this machine.")
+
+        notes = []
+        if survey.hidden:
+            notes.append(
+                f"{_plural(survey.hidden, 'entry', 'entries')} marked NoDisplay or "
+                "Hidden, which a desktop does not show in its menu, counted and "
+                "not classified"
+            )
+        if survey.duplicates:
+            notes.append(
+                f"{_plural(survey.duplicates, 'entry', 'entries')} shadowed by an "
+                "entry of the same name in an earlier directory"
+            )
+        if survey.skipped:
+            notes.append(
+                f"{_plural(survey.skipped, 'entry', 'entries')} left unread when "
+                f"the scan's {toolkits.TIME_BUDGET:.2f} second budget ran out"
+            )
+        if survey.network_skipped:
+            notes.append(
+                f"{survey.network_skipped} path(s) on a network filesystem, which "
+                "are never visited: a server that has stopped answering turns "
+                "reading a file into an unbounded wait"
+            )
+        sources = [
+            f"{count} {phrase}"
+            for key, phrase in SOURCE_NAMES
+            if (count := survey.sources.get(key, 0))
+        ]
+        body = _body(
+            "Every desktop entry found, and where. A desktop entry is a text "
+            "file naming a program, an icon and the command that starts it. "
+            "KÖKEN reads the command, follows it to the file it really names - "
+            "usually through a wrapper script or two - and reads that file. "
+            "Nothing on this page was started to produce it.",
+            lines + _titled("How each was settled", sources) + _titled("Not counted", notes),
+        )
+        return self.row(
+            "toolkit_scan",
+            "Applications scanned",
+            str(total),
+            gloss=(
+                f"from {_plural(len(survey.directories), 'directory', 'directories')}"
+                if survey.directories
+                else "no applications directory exists here"
+            ),
+            body=body,
+        )
+
+    def _mix_row(self, survey, counts: dict, total: int):
+        used = [key for key, count in counts.items() if count]
+        if not total:
+            return self.row("toolkit_mix", "Toolkit mix", "No applications found")
+        leader = max(used, key=lambda key: counts[key]) if used else ""
+        gloss = ""
+        if leader:
+            label = toolkits.TOOLKIT_BY_KEY[leader].label
+            gloss = f"{label} leads, with {counts[leader]} of {total} applications"
+        return self.row(
+            "toolkit_mix",
+            "Toolkit mix",
+            f"{_plural(len(used), 'toolkit', 'toolkits')} in use",
+            gloss=gloss,
+        )
+
+    def _toolkit_row(self, toolkit, survey, count: int):
+        """One toolkit: the version on disk, and how much of the machine uses it.
+
+        The value is the version rather than the count because the version is
+        what somebody would paste into a search, and the copy control hands
+        over the value. The count is the gloss beside it.
+        """
+        installed = survey.installed.get(toolkit.key) or toolkits.Installed()
+        if installed.version:
+            value = installed.version
+        elif installed.present:
+            value = "Installed, version not stated by the file name"
+        elif toolkit.key == "electron":
+            value = "No system-wide copy"
+        else:
+            value = "Not installed"
+        if count:
+            gloss = _plural(count, "application", "applications")
+        elif installed.present:
+            gloss = "installed, nothing here uses it"
+        else:
+            gloss = "and nothing here uses it"
+        return self.row(f"toolkit_{toolkit.key}", toolkit.label, value, gloss=gloss)
+
+    def _list_row(self, survey, order, total: int):
+        """The roll call, grouped, in one expansion instead of four hundred rows."""
+        lines: list[str] = []
+        listed = 0
+        remaining = 0
+        for toolkit in order:
+            apps = survey.by_toolkit(toolkit.key)
+            if not apps:
+                continue
+            if listed >= MAX_LISTED:
+                remaining += len(apps)
+                continue
+            if lines:
+                lines.append("")
+            lines.append(
+                f"{toolkit.label} — {_plural(len(apps), 'application', 'applications')}"
+            )
+            for app in sorted(apps, key=lambda item: natural_key(item.name.lower())):
+                if listed >= MAX_LISTED:
+                    remaining += 1
+                    continue
+                lines.append(f"  {app.describe()}")
+                listed += 1
+        if remaining:
+            lines.append("")
+            lines.append(f"{remaining} further application(s) not listed here.")
+
+        classified = total - len(survey.unclassified)
+        if not classified:
+            return self.row(
+                "toolkit_applications",
+                "Application list",
+                "Nothing was identified on this machine",
+            )
+        return self.row(
+            "toolkit_applications",
+            "Application list",
+            f"{classified} identified — expand for the full list",
+            body=_body(
+                "Every application that was placed, grouped by what it is built "
+                "on, each with the evidence it was placed by. An application "
+                "linking a second toolkit as well is marked; that is ordinary, "
+                "and says which one draws the window rather than which one is "
+                "loaded.",
+                lines,
+            ),
+        )
+
+    def _unclassified_row(self, survey):
+        rest = survey.unclassified
+        if not rest:
+            return self.row(
+                "toolkit_unclassified",
+                "Not classified",
+                "0",
+                gloss="every application was placed",
+            )
+        return self.row(
+            "toolkit_unclassified",
+            "Not classified",
+            str(len(rest)),
+            gloss=_plural(len(rest), "application", "applications"),
+            body=_body(
+                "Applications whose toolkit the files do not state. There are "
+                "four ordinary reasons and none of them is a fault: the program "
+                "loads its toolkit with dlopen at runtime rather than linking it, "
+                "which is how LibreOffice and anything with a plugin-based "
+                "interface layer works; its wrapper computes the path it starts "
+                "rather than writing it down; it is written in a language whose "
+                "own runtime carries the widgets; or the command the entry names "
+                "is not installed. KÖKEN names these rather than guessing at "
+                "them - a wrong answer here would be worse than none.",
+                [f"  {app.describe()}" for app in sorted(
+                    rest, key=lambda item: natural_key(item.name.lower())
+                )][:MAX_LISTED],
+            ),
+        )
+
 
 def _current_user() -> str | None:
     for name in ("USER", "LOGNAME"):
@@ -263,3 +507,21 @@ def _portal_state() -> str:
         "xdg-desktop-portal was not found. KÖKEN cannot ask whether the system is "
         "set to light or dark, and uses its dark palette."
     )
+
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _titled(title: str, lines: list[str]) -> list[str]:
+    """A titled block inside a row body, or nothing when it would be empty."""
+    if not lines:
+        return []
+    return ["", f"{title}:"] + [f"  {line}" for line in lines]
+
+
+def _body(lead: str, lines: list[str]) -> str:
+    """A row's own expansion: a paragraph of context, then the machine's list."""
+    if not lines:
+        return lead
+    return lead + "\n\n" + "\n".join(lines)

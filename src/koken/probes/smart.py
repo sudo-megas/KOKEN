@@ -47,6 +47,7 @@ from __future__ import annotations
 from .base import (
     DANGER,
     NORMAL,
+    NOT_REPORTED,
     REQUIRES_ROOT,
     STATIC,
     VOLATILE,
@@ -122,6 +123,13 @@ NVME_DATA_UNIT_BYTES = 512 * 1000
 # temperate on the other.
 HOT_CELSIUS = 60
 
+# The attribute udisks2's SmartTemperature is the same measurement as, and the
+# only one the live reading is substituted into. A drive frequently reports a
+# second temperature under 190, Airflow_Temperature_Cel, which is a different
+# sensor in a different place; writing one number into both rows would be
+# inventing a reading for a sensor nobody read. 190 keeps its own raw value.
+TEMPERATURE_ID = 194
+
 
 def _celsius(kelvin) -> float | None:
     """udisks2 reports SMART temperature in kelvin, as a float."""
@@ -158,6 +166,20 @@ def _leading_int(value) -> int | None:
 def _matches(name: str, needles) -> bool:
     lowered = name.lower()
     return any(needle in lowered for needle in needles)
+
+
+def _is_temperature(identifier, name: str) -> bool:
+    """Whether this attribute is the drive temperature udisks2 also reports.
+
+    A numbered attribute is judged on its number, because the number is the
+    thing vendors agree on and the name is not. Only a table that arrived
+    without ids at all falls back to reading the name.
+    """
+    if identifier == TEMPERATURE_ID:
+        return True
+    if isinstance(identifier, int):
+        return False
+    return "temperature" in name.lower() and "airflow" not in name.lower()
 
 
 class SmartProbe(Probe):
@@ -227,7 +249,22 @@ class SmartProbe(Probe):
                 return self._ata_rows(attributes, drive_path, "smartctl")
 
         value, severity = self._why_not(disk, report)
-        return [self.row("status", "Attribute table", value, severity=severity)]
+        rows = [self.row("status", "Attribute table", value, severity=severity)]
+        if value == REQUIRES_ROOT:
+            # A bare refusal on a tab whose entire content is missing is the
+            # one place it is worth saying what the password would buy.
+            rows.append(
+                self.row(
+                    "why",
+                    "Why",
+                    "Reading the attribute table means sending the drive a "
+                    "command, which only the administrator may do. The health "
+                    "verdict, temperature and power-on hours on the Disks tab "
+                    "come from udisks2, which asks on its own behalf, and are "
+                    "there whether this prompt was answered or not.",
+                )
+            )
+        return rows
 
     def _why_not(self, disk, report) -> tuple:
         """The value and severity for a drive with no table, and why.
@@ -340,13 +377,13 @@ class SmartProbe(Probe):
         # whether anything is currently able to move it is a separate question,
         # and deciding the tier on that would leave the row static forever on a
         # drive udisks2 had simply not got round to reading at launch.
-        temperature = _matches(name, ("temperature", "airflow_temp"))
+        temperature = _is_temperature(identifier, name)
         head = ""
         if temperature and kelvin is not None:
             head = f"{kelvin:.0f} °C"
         if raw not in (None, ""):
             head = f"{head} — {raw}" if head else str(raw)
-        text = f"{head} — {detail}" if head and detail else (head or detail or "Not reported")
+        text = f"{head} — {detail}" if head and detail else (head or detail or NOT_REPORTED)
 
         return self.row(
             "attribute",
@@ -513,7 +550,7 @@ class SmartProbe(Probe):
                 )
             attributes = report.get("attributes") if isinstance(report, dict) else None
             for entry in attributes or []:
-                if _matches(str(entry.get("name") or ""), ("temperature", "airflow_temp")):
+                if _is_temperature(entry.get("id"), str(entry.get("name") or "")):
                     rows.append(self._ata_row(entry, kelvin))
             if rows:
                 out[disk["name"]] = rows

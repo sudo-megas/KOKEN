@@ -51,7 +51,9 @@ settings screen. It shows you what is there.
 ## 2. DEPENDENCIES
 
 KÖKEN needs six things. This section explains why each one is there, and why
-there are only six.
+there are only six. There is also exactly one *optional* extra, which section
+2.1 covers on its own - the application runs without it and nothing installs it
+for you.
 
 The short version: everything on this list does real work that would otherwise
 have to be written badly by hand. Nothing on it is there for convenience.
@@ -135,9 +137,8 @@ on Wayland, broken outright.
   picking apart its printed output is fragile: it breaks whenever that program
   changes how it prints, and it cannot tell you anything the program chose not
   to print.
-- **`smartmontools`** - `udisks2` already reads drive health, and already
-  handles asking for permission. Adding this would mean a second way of doing
-  the same thing.
+- **`smartmontools`** - not required, and not installed by KÖKEN. It is
+  *optional*, and section 2.1 below explains the one thing it adds.
 
 ### One thing that ships inside
 
@@ -149,6 +150,71 @@ licence, and it is fourteen kilobytes. Its licence is in `LICENSE-tabler`.
 It is a font rather than a folder of pictures for a plain reason: symbols drawn
 as text take the colour of the text around them, so they change with the theme
 by themselves.
+
+## 2.1 ONE OPTIONAL EXTRA: `smartmontools`
+
+There are six required dependencies and exactly one optional one. KÖKEN runs
+perfectly well without it, and no package manager will pull it in for you: the
+Arch package lists it under `optdepends` and the Debian package under
+`Suggests`, both of which mean "you may want this", not "you need this".
+
+**What you get with it.** Under `Storage` there is a tab called `SMART`, with
+one entry per drive. With `smartmontools` installed, that tab shows the drive's
+complete attribute table - every counter the drive keeps about itself, by name
+and by number, with the drive's own normalised, worst and threshold values and
+the raw reading beside them:
+
+```
+  5 Reallocated_Sector_Ct     24 — value 100, worst 100, threshold 10
+  7 Seek_Error_Rate           4295032833 — value 8, worst 8, threshold 45
+  9 Power_On_Hours            12500 — value 86, worst 86, threshold 0
+  194 Temperature_Celsius     38 °C — 38 (Min/Max 20/45) — value 62, worst 45
+  197 Current_Pending_Sector  8 — value 100, worst 100, threshold 0
+```
+
+The counters that actually predict a failure - reallocated sectors, pending
+sectors, uncorrectable errors, cable CRC errors, flash wear - are coloured when
+they are not zero. Anything that has crossed the threshold the drive itself
+publishes is coloured more strongly again. Those thresholds are the drive's,
+not KÖKEN's: nothing here invents a number and calls it a limit.
+
+NVMe drives have no attribute table - the standard replaced it with a health
+log - so the same tab shows that instead: percentage of rated endurance used,
+available spare against the drive's own spare threshold, data written, media
+errors, unsafe shutdowns.
+
+**What you lose without it.** That table, and nothing else. Every other SMART
+value in the application comes from `udisks2` over D-Bus and is unaffected: the
+health verdict, the temperature, the power-on hours, the reallocated sector
+count, the number of attributes past their threshold and the last self-test
+result all still appear on the `Disks` tab exactly as before. The `SMART` tab
+still lists every drive; each one says that the table needs `smartmontools` and
+why.
+
+**Why it is needed at all,** when `udisks2` reads SMART already: `udisks2` will
+hand over the attribute table, but only in a data type that Qt maps to an
+opaque container which this Python binding cannot read - attempting to unpack
+it terminates the process. Every other SMART value comes back in a type the
+binding handles. So KÖKEN asks `udisks2` first, every time, and falls back to
+`smartctl` only for the table.
+
+**What it costs you.** One command, `smartctl`, run once at startup by the same
+privileged helper that reads the memory table, inside the same password prompt
+you already answered. No daemon, no background monitoring, nothing added to
+your startup. If you install Debian's `smartmontools` package it does bring the
+`smartd` monitoring daemon with it - KÖKEN neither uses nor starts it, and that
+is exactly why the dependency is a suggestion rather than a recommendation.
+
+**A drive that is asleep is left asleep.** KÖKEN passes `-n standby`, which
+tells `smartctl` to check the drive's power mode first and give up if it is
+parked. Opening a hardware browser should not spin up your laptop's disk. Such
+a drive's tab says so, and the table appears the next time you look after the
+drive has been used.
+
+**Some drives will not answer whatever you install.** A USB enclosure usually
+cannot: most bridge chips do not pass SMART commands through to the drive
+behind them. Card readers generally report nothing at all. In both cases the
+tab shows what `smartctl` itself said about that device rather than a guess.
 
 ---
 
@@ -234,7 +300,7 @@ information to open its explanation.
 |---|---|
 | **Hardware** | Your processor - cores, threads, clock speeds, cache, what instructions it supports, and which known processor flaws affect it. Your memory - how much, how fast, which slots are filled, and how many channels are actually in use. Your graphics cards, each one on its own tab. Your monitors, including when each was manufactured. Your motherboard and its firmware. |
 | **System** | Which Linux distribution this is and which version. Which kernel, which flavour of it, and every setting it was started with. Your desktop session. And a security page: Secure Boot, kernel lockdown, device isolation, and the protections your kernel has switched on. |
-| **Storage** | Every drive, with its model, serial number, and its own health report - including how many hours it has been running. Every partition, with what is on it, how full it is, and where it is attached. Everything currently mounted, and your swap space. |
+| **Storage** | Every drive, with its model, serial number, and its own health report - including how many hours it has been running. Every partition, with what is on it, how full it is, and where it is attached. A SMART page carrying each drive's full attribute table, one row per counter the drive keeps, with the ones that predict a failure picked out. Everything currently mounted, and your swap space. |
 | **Peripherals** | Everything plugged in: USB devices, everything on the internal PCI bus, network connections with their speed and traffic counters, sound cards, keyboards and mice, batteries and power, and every temperature and fan sensor the machine has. |
 
 ### Getting a value out

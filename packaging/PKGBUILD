@@ -29,6 +29,14 @@ license=('GPL-3.0-or-later')
 # pacman aborts the whole transaction on the unknown target and reports
 # every other dependency as missing too.
 depends=('python' 'pyside6' 'hwdata' 'udisks2' 'dmidecode' 'polkit')
+# Optional, and only one thing depends on it: the per-attribute SMART table
+# under Storage. udisks2 supplies the health verdict, the temperature and the
+# power-on hours over D-Bus, and those are unaffected by this being absent -
+# the attribute table is the one thing udisks2 returns in a form the Qt binding
+# cannot read, so smartctl is the second route to it. Everything else in the
+# application works identically either way, which is what makes this optdepends
+# and not depends.
+optdepends=('smartmontools: the full per-attribute SMART table under Storage')
 makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel' 'imagemagick')
 source=()
 sha256sums=()
