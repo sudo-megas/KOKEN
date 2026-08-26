@@ -43,7 +43,23 @@ HELPER_CANDIDATES = (
     "/usr/libexec/koken/koken-helper",
 )
 
-TIMEOUT_MS = 10_000
+# Two separate budgets, because a pkexec run is two things end to end.
+#
+# The first is somebody reading an authentication prompt, which they have never
+# seen before, on the machine they have just switched on. Ten seconds for that
+# is not a timeout, it is a way of cancelling on a slow typist and then telling
+# them the helper was too slow. The helper writes one line to stderr the moment
+# it starts, so the wait for authentication ends the instant work begins - and
+# a prompt that is genuinely never answered still gives up rather than hanging
+# the launch forever.
+AUTH_TIMEOUT_MS = 120_000
+
+# The second is the work itself, which is bounded: two dmidecode calls with a
+# five second limit each, three small file reads, and a debugfs glob.
+WORK_TIMEOUT_MS = 20_000
+
+# Kept as the old name for anything that passed it in.
+TIMEOUT_MS = WORK_TIMEOUT_MS
 
 # pkexec's own exit codes, distinct from anything the helper returns.
 EXIT_DISMISSED = 126
@@ -201,8 +217,12 @@ def find_helper() -> str | None:
     return None
 
 
-def run(helper_path: str | None = None, timeout_ms: int = TIMEOUT_MS) -> PrivilegedData:
-    """Ask once, wait at most ten seconds, and never ask again.
+def run(
+    helper_path: str | None = None,
+    timeout_ms: int = WORK_TIMEOUT_MS,
+    auth_timeout_ms: int = AUTH_TIMEOUT_MS,
+) -> PrivilegedData:
+    """Ask once, wait for an answer, and never ask again.
 
     Blocking is correct here and only here: this runs before the window is
     shown, so there is no interface to keep responsive, and the polkit agent
@@ -227,10 +247,25 @@ def run(helper_path: str | None = None, timeout_ms: int = TIMEOUT_MS) -> Privile
     if not process.waitForStarted(5_000):
         return _empty("The privileged helper could not be started")
 
-    if not process.waitForFinished(timeout_ms):
+    # Phase one: the polkit agent owns the screen. This ends as soon as the
+    # helper says it has started, or as soon as pkexec gives up and says why.
+    process.setReadChannel(QProcess.ProcessChannel.StandardError)
+    if not process.waitForReadyRead(auth_timeout_ms):
+        if process.state() == QProcess.ProcessState.Running:
+            process.kill()
+            process.waitForFinished(1_000)
+            return _empty(
+                "The administrator prompt went unanswered, so privileged "
+                "details were not read"
+            )
+
+    # Phase two: the helper is running as root and doing bounded work.
+    if process.state() != QProcess.ProcessState.NotRunning and not process.waitForFinished(
+        timeout_ms
+    ):
         process.kill()
         process.waitForFinished(1_000)
-        return _empty("The privileged helper did not finish within ten seconds")
+        return _empty("The privileged helper did not finish in time")
 
     if process.exitStatus() != QProcess.ExitStatus.NormalExit:
         return _empty("The privileged helper stopped unexpectedly")

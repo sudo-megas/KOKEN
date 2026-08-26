@@ -124,6 +124,19 @@ the "shared by" count on this row tells you how many threads are really
 competing for this particular slice.
 """
 
+[hardware.cpu.cache_l4]
+long = """
+A fourth level of cache, which most processors do not have. Where it exists it
+is usually not on the processor die at all: Intel's Broadwell desktop parts put
+128 MB of eDRAM beside the die and used it as a victim cache for L3 and as a
+frame buffer for the integrated graphics, and several recent designs use stacked
+memory the same way.
+
+Its absence means nothing is wrong. A machine with three levels of cache is the
+ordinary case, and a fourth level is a design decision about a particular
+workload rather than a measure of quality.
+"""
+
 [hardware.cpu.microarch_level]
 long = """
 The x86-64 feature levels are a shorthand the toolchain uses: v2 is roughly
@@ -219,6 +232,31 @@ Enabling it is a firmware setting. It is the single largest free performance
 difference on most self-built machines.
 """
 
+[hardware.memory.dimm_rated]
+short = "what the module can do"
+long = """
+The fastest speed this module is rated for, as its own SPD chip reports it. It
+is a property of the module and has nothing to do with what the machine is
+currently running it at - see "Running at" for that.
+
+A module sold as DDR5-6000 is a JEDEC-standard module with a faster profile
+stored alongside the standard one. Firmware ignores that profile unless XMP or
+EXPO is switched on, which is why memory bought for its advertised speed so
+often runs slower than the box until somebody changes a setting.
+"""
+
+[hardware.memory.dimm_configured]
+short = "what it is actually running at"
+long = """
+The speed the memory controller settled on for this module, which is the number
+that affects the machine.
+
+It is lower than the rated speed far more often than people expect. Filling all
+four slots on a consumer board, mixing kits, or simply leaving XMP or EXPO off
+will each do it. A gap between this row and "Rated speed" is worth a look in
+firmware; the two matching means the memory is doing what it was bought to do.
+"""
+
 [hardware.memory.available]
 long = """
 How much memory could be given to a new program right now, which is not the
@@ -238,6 +276,50 @@ surrender on demand.
 
 Sustained use near total, with swap filling as well, is the point at which a
 machine starts to feel slow.
+"""
+
+[hardware.memory.cached]
+short = "not lost, borrowed"
+long = """
+File contents the kernel is keeping in memory because it has the room. This is
+the number behind the perennial complaint that Linux has "used all my RAM".
+
+It has not. Cache is given back the instant a program asks for memory, and
+keeping it is strictly better than leaving memory idle - it is the difference
+between a program starting from disk and starting from memory. The row worth
+watching is "Available", which already counts everything reclaimable.
+"""
+
+[hardware.memory.buffers]
+long = """
+Memory holding block-device metadata - the bookkeeping a filesystem needs
+rather than the contents of files, which are counted under "Cached".
+
+It is normally small, a few hundred megabytes at most, and like cache it is
+reclaimed the moment something needs the memory.
+"""
+
+[hardware.memory.swap_total]
+long = """
+Disk space set aside to hold memory pages that are not being used, so that the
+memory they occupied can go to something that is.
+
+Having swap does not mean it will be used, and swap being used does not mean
+the machine is short of memory: the kernel will move genuinely idle pages out
+even when memory is plentiful, because idle pages in RAM are wasted RAM. Zero
+here is a deliberate choice somebody made, and on a machine that also uses
+hibernation it is a choice that disables it.
+"""
+
+[hardware.memory.swap_free]
+long = """
+How much of the swap area is still empty.
+
+Swap filling up while memory is also full is the state that makes a machine
+feel like it has stopped: every page it needs has to be read back from disk
+before anything can continue. Swap sitting mostly used while memory is free is
+the opposite and is harmless - those are pages nothing has wanted for a long
+time.
 """
 
 [hardware.memory.ecc]
@@ -299,6 +381,30 @@ memory and much faster for the card to reach.
 When a workload needs more than this, the driver spills the excess into system
 memory across the PCIe link. That still works, but it is far slower, and it is
 the point at which frame times usually become uneven rather than merely lower.
+"""
+
+[hardware.graphics.core_clock]
+long = """
+The frequency the graphics core is running at now, followed by the states the
+driver is allowed to choose between.
+
+An idle card sits at the bottom of that list and only leaves it under load, so
+a low number here on a desktop doing nothing is correct rather than a sign of
+throttling. Reading this row repeatedly while something demanding is running is
+the only way to tell the difference between a card that will not clock up and
+one that simply has nothing to do.
+"""
+
+[hardware.graphics.memory_clock]
+long = """
+The frequency of the memory on the graphics card, and the states available to
+it.
+
+It moves in far coarser steps than the core clock and often stays pinned near
+the top: video memory that is switching speed cannot be read, so drivers avoid
+changing it while anything is on screen. On several cards it stays at maximum
+whenever more than one display is attached, which is a known driver behaviour
+and not a fault.
 """
 
 [hardware.graphics.temperature]
@@ -586,6 +692,52 @@ Anything lower has almost certainly been set deliberately, usually for
 debugging, and is worth putting back.
 """
 
+[system.security.ptrace_scope]
+long = """
+How far one program may reach into another to read its memory. This is what a
+debugger does, and it is equally what a program stealing passwords out of a
+browser would do.
+
+Every mainstream distribution ships 1, which allows a debugger to attach to a
+program it started itself and blocks everything else. That is the setting that
+stops one compromised program from rifling through the others running as you.
+0 restores the old behaviour where any of your programs may read any other, and
+is occasionally needed by debugging and profiling tools; it should be put back
+afterwards.
+"""
+
+[system.security.kptr_restrict]
+long = """
+Whether addresses inside the kernel are shown to programs that ask.
+
+They look like harmless numbers, and for an attacker they are the missing piece:
+knowing where the kernel put something turns a flaw that would crash the machine
+into one that can be aimed. 1 hides them from ordinary users and is what
+distributions ship. 0 is worth changing back unless a profiler needs it.
+"""
+
+[system.security.dmesg_restrict]
+long = """
+Whether an ordinary user may read the kernel log.
+
+The log is genuinely useful for working out why hardware is misbehaving, and it
+also carries kernel addresses, device serial numbers and details of what the
+machine is running. Distributions differ on this one for that reason, and
+neither setting is a mistake. If it is restricted, the same log is still
+readable with administrator access.
+"""
+
+[system.security.unprivileged_bpf]
+long = """
+Whether a program running as you may load a BPF program into the kernel.
+
+BPF is how modern tracing, profiling and network filtering tools work, and it
+runs the code they supply inside the kernel behind a verifier. That verifier has
+had a long series of serious flaws, which is why most distributions now disable
+unprivileged loading by default and require administrator access for it. A value
+of 1 also means the setting is locked until the machine restarts.
+"""
+
 [system.security.tpm]
 long = """
 A small dedicated chip that can hold keys and measure what the machine started
@@ -666,6 +818,17 @@ happens behind some RAID controllers and in some virtual machines - gets
 treated as though seeking were expensive, and is slower for it.
 """
 
+[storage.disks.nvme_state]
+long = """
+What the NVMe controller is doing. `live` is the only state a working drive
+stays in.
+
+`resetting` and `connecting` are transient and appear while the driver is
+recovering a controller that stopped answering; a drive that keeps returning to
+them under load is failing, overheating, or losing power - on a laptop, often
+the third. `deleting` means the controller is being removed.
+"""
+
 [storage.disks.block_size]
 long = """
 The block size the drive advertises to the kernel, and the one it really uses
@@ -726,6 +889,19 @@ machine from booting, and the smaller figure is what you can actually use.
 Filesystems slow down as they fill, and copy-on-write filesystems slow down
 sooner and more sharply than others. Below about ten percent free is worth
 acting on.
+"""
+
+[storage.volumes.partition_type]
+long = """
+What the partition table says this partition is for, which is not the same as
+what is on it.
+
+On a GPT disk it is a GUID naming a purpose - EFI system partition, Linux
+filesystem, Linux swap, Microsoft basic data - and on an MBR disk a single byte
+doing the same job less precisely. Nothing enforces it: the type says what the
+partition was created to hold, while the "Filesystem" row above says what was
+actually found there. The two disagreeing is worth noticing, because firmware
+and installers make decisions from the type alone.
 """
 
 [storage.volumes.filesystem]
@@ -897,6 +1073,18 @@ so that the layout does not change depending on what hardware is fitted.
 On a portable machine it means something else: the battery is not being
 reported at all, which points at the firmware or at the kernel module rather
 than at the battery.
+"""
+
+[peripherals.power.battery_capacity_level]
+long = """
+A coarse description of the charge - Full, High, Normal, Low or Critical -
+supplied by batteries that do not report a percentage.
+
+Where a percentage is also shown, this row adds nothing and can be ignored.
+Where it is the only thing offered, it is because the battery's own controller
+is not reporting a usable capacity figure, which is normal for some external and
+uninterruptible-supply batteries and is a sign of a worn-out gauge in an
+internal one.
 """
 
 [peripherals.power.battery_draw]

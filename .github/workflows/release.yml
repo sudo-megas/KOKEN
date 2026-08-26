@@ -20,8 +20,12 @@ on:
     tags:
       - "v*"
 
+# Read by default. The two build jobs run distribution build tooling that
+# fetches and executes packaging scripts, and there is no reason for the token
+# they can see to be able to write to the repository. Only the job that
+# publishes the release is given that, below.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   arch:
@@ -97,6 +101,8 @@ jobs:
     name: Publish
     needs: [arch, debian]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,19 +122,22 @@ jobs:
       # The release body is the tag's own message, so what is written on the
       # tag is what appears on the release. generate_release_notes is off:
       # a commit list is not a release note.
+      #
+      # Written to a file rather than through a $GITHUB_OUTPUT heredoc. A
+      # heredoc needs a delimiter that cannot appear in the body, and the body
+      # here is arbitrary text from a tag - a message containing the delimiter
+      # line would end the heredoc early and the remainder of the tag message
+      # would be read as workflow output. A file has no delimiter to collide
+      # with.
       - name: Take the release body from the tag message
-        id: body
         run: |
           git fetch --force --tags
-          {
-            echo 'text<<KOKEN_TAG_MESSAGE'
-            git tag -l --format='%(contents)' "${GITHUB_REF_NAME}"
-            echo 'KOKEN_TAG_MESSAGE'
-          } >> "$GITHUB_OUTPUT"
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-body.txt
+          wc -c release-body.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
-          body: ${{ steps.body.outputs.text }}
+          body_path: release-body.txt
           generate_release_notes: false
           fail_on_unmatched_files: true

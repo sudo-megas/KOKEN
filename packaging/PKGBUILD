@@ -32,13 +32,25 @@ _root="$startdir/.."
 
 build() {
   cd "$_root"
-  python -m build --wheel --no-isolation
+  # Built into makepkg's own directory rather than the checkout's dist/, and
+  # that directory is emptied first. `python -m installer` takes exactly one
+  # wheel; a dist/ holding an earlier build - a different version, or the same
+  # version built before a change - makes `dist/*.whl` expand to two paths, and
+  # the package gets whichever of them sorts first.
+  rm -rf "$srcdir/dist"
+  python -m build --wheel --no-isolation --outdir "$srcdir/dist"
 }
 
 package() {
   cd "$_root"
 
-  python -m installer --destdir="$pkgdir" dist/*.whl
+  local _wheels=("$srcdir"/dist/*.whl)
+  if (( ${#_wheels[@]} != 1 )); then
+    printf 'expected one wheel in %s, found %d\n' \
+      "$srcdir/dist" "${#_wheels[@]}" >&2
+    return 1
+  fi
+  python -m installer --destdir="$pkgdir" "${_wheels[0]}"
 
   # The privileged helper. The path is fixed: the polkit action names it
   # exactly, and pkexec refuses to run anything the action does not name.

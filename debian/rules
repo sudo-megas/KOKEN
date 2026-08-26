@@ -19,8 +19,9 @@ MAGICK = $(shell command -v magick 2>/dev/null || command -v convert 2>/dev/null
 
 override_dh_auto_install:
 	dh_auto_install
-	# The helper is installed by debian/install; only its mode needs setting,
-	# and it is set here because dh_install does not carry modes.
+	# The helper is installed here rather than through debian/install, because
+	# dh_install does not carry modes and this one file has to arrive 0755.
+	# Everything else in the package is listed in debian/install as usual.
 	install -d debian/koken/usr/lib/koken
 	install -m0755 helper/koken-helper debian/koken/usr/lib/koken/koken-helper
 	set -e; for size in $(ICON_SIZES); do \

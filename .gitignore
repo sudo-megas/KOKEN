@@ -18,6 +18,7 @@ debian/.debhelper/
 debian/koken/
 debian/files
 debian/*.substvars
+debian/*.debhelper
 debian/*.debhelper.log
 debian/debhelper-build-stamp
 ../koken_*.deb

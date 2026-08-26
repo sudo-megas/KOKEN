@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 #
 # KOKEN - Machine Corpus
 #
@@ -6,6 +6,11 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
+
+# The interpreter is named absolutely and not looked up through `env`. pkexec
+# runs this as root with an environment it has sanitised, and the one thing a
+# `#!/usr/bin/env python3` line does is go back to searching a PATH for the
+# program to run as root. Every distribution this ships to has /usr/bin/python3.
 
 """The only part of KOKEN that runs as root, for well under a second.
 
@@ -251,7 +256,18 @@ def collect():
     return payload
 
 
+# Written to stderr the moment the helper begins, and nowhere else. It is how
+# the caller tells the two halves of a pkexec run apart: everything before this
+# line is a person reading an authentication prompt, and everything after it is
+# this program doing work. Without the marker the caller has one timeout for
+# both, and either it is short enough to kill somebody who was still typing
+# their password or long enough to hang on a wedged dmidecode.
+READY_MARKER = "koken-helper: reading\n"
+
+
 def main():
+    sys.stderr.write(READY_MARKER)
+    sys.stderr.flush()
     if os.geteuid() != 0:
         # Still emit a well-formed object. Run unprivileged for a smoke test
         # and the shape is right even though the content is empty.

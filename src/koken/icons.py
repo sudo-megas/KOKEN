@@ -29,8 +29,14 @@ index. To rebuild::
     npm pack @tabler/icons-webfont
     # take the name -> code point pairs out of dist/tabler-icons.css,
     # then subset dist/fonts/tabler-icons.ttf to the code points in GLYPHS
-    # with fontTools, keeping name IDs 0-6, 13 and 14 so the MIT notice
-    # travels inside the font file.
+    # with fontTools.
+
+The subset carries name IDs 0, 13 and 14 - copyright, licence and licence URL -
+which the upstream webfont build does not emit and which have to be set on the
+name table explicitly. They are there so that the MIT notice travels inside the
+font file itself, for anyone who ends up holding the TTF and nothing else. The
+same notice is also shipped whole as ``LICENSE-tabler``, and both packages
+install it to ``/usr/share/licenses/koken/``.
 
 One concept has no icon on purpose. CORE names ``chip`` for a generic PCI
 device, and there is no icon called ``chip`` in Tabler - there is
