@@ -121,11 +121,22 @@ def get_root() -> Path:
 
 
 def resolve(path: str | Path) -> Path:
-    """Join *path* under the active root."""
+    """Join *path* under the active root.
+
+    A path that is already inside the root is returned untouched. This matters
+    because the glob helpers hand back rooted paths, and probes then build on
+    those - ``card["device"] / "vendor"`` is already rooted, and joining it
+    under the root a second time would silently address a directory that does
+    not exist.
+    """
     p = Path(path)
     if _root == Path("/"):
         return p
-    return _root / p.relative_to("/") if p.is_absolute() else _root / p
+    if p.is_absolute():
+        if p == _root or _root in p.parents:
+            return p
+        return _root / p.relative_to("/")
+    return _root / p
 
 
 # --------------------------------------------------------------------------
@@ -198,13 +209,19 @@ def read_lines(path: str | Path) -> list[str]:
 
 
 def read_link_name(path: str | Path) -> str | None:
-    """The final component of a symlink's target, or None.
+    """The final component of a symlink's target, or None if it is not a symlink.
 
     This is how a driver name is read: ``device/driver`` points at
     ``../../../bus/pci/drivers/amdgpu``, and the useful part is the last one.
+    The symlink check is not decoration - without it a plain directory would
+    answer with its own name, so a card with no driver bound would report a
+    driver called "driver".
     """
     try:
-        target = resolve(path).resolve()
+        target = resolve(path)
+        if not target.is_symlink():
+            return None
+        target = target.resolve()
     except (OSError, ValueError, RuntimeError):
         return None
     name = target.name
@@ -218,9 +235,15 @@ def glob_paths(pattern: str) -> list[Path]:
     gets wrong and which shows up in every enumeration in this package.
     """
     p = Path(pattern)
-    anchor = Path(p.anchor) if p.is_absolute() else Path(".")
-    relative = p.relative_to(anchor)
-    base = resolve(anchor) if p.is_absolute() else anchor
+    if p.is_absolute():
+        # Root the pattern through resolve() so a pattern that is already
+        # inside the root is not rooted twice. Glob metacharacters survive
+        # this untouched: resolve() only joins path components.
+        rooted = resolve(p)
+        base = Path(rooted.anchor)
+        relative = rooted.relative_to(base)
+    else:
+        base, relative = Path("."), p
     try:
         matches = list(base.glob(str(relative)))
     except (OSError, ValueError, NotImplementedError):
