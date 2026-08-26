@@ -139,9 +139,9 @@ per device, and therefore vary per machine. All others are fixed.
 
 | Row 2 | Row 3 |
 |---|---|
-| Operating system | Overview · Distribution · Init · Packages |
+| Operating system | Overview · Distribution · Init · Packages · File types |
 | Kernel | Overview · Command line · Modules |
-| Desktop | Overview · Session · Toolkits |
+| Desktop | Overview · Session · Toolkits · Portals |
 | Security | Overview |
 
 ### 6.3 Storage
