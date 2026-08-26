@@ -31,6 +31,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PySide6.QtCore import QObject, Slot
+from PySide6.QtDBus import QDBusVariant
+
 from . import config
 
 # org.freedesktop.appearance color-scheme, as the portal defines it.
@@ -435,7 +438,9 @@ QToolTip {{
     background: {surface};
 }}
 
-#mountError {{
+/* CORE 12.4: a mount or unmount failure is shown as an expansion body under
+   the row it came from, styled as a warning. */
+#rowBody[severity="warning"] {{
     color: {warning};
     font-size: {size_body_text}pt;
 }}
@@ -602,38 +607,60 @@ class Theme:
     # -- live updates -----------------------------------------------------
 
     def watch(self) -> bool:
-        """Subscribe to the portal's change signal. False if there is none."""
+        """Subscribe to the portal's change signal. False if there is none.
+
+        Every failure here is swallowed. Live theme switching is a convenience,
+        and an application that refuses to start because an optional D-Bus
+        subscription could not be set up would be trading something essential
+        for something pleasant.
+        """
         try:
+            from PySide6.QtCore import SLOT
             from PySide6.QtDBus import QDBusConnection
-        except ImportError:
+
+            bus = QDBusConnection.sessionBus()
+            if not bus.isConnected():
+                return False
+            watcher = _PortalWatcher(self)
+            # The receiver must be a QObject and the slot must be given in the
+            # SLOT() form with its full signature. A plain object, or the bare
+            # method name as bytes, is rejected at the binding layer.
+            connected = bus.connect(
+                PORTAL_SERVICE,
+                PORTAL_PATH,
+                PORTAL_INTERFACE,
+                "SettingChanged",
+                watcher,
+                SLOT("onSettingChanged(QString,QString,QDBusVariant)"),
+            )
+        except Exception:
             return False
-        bus = QDBusConnection.sessionBus()
-        if not bus.isConnected():
-            return False
-        self._watch = _PortalWatcher(self)
-        return bus.connect(
-            PORTAL_SERVICE,
-            PORTAL_PATH,
-            PORTAL_INTERFACE,
-            "SettingChanged",
-            self._watch,
-            b"onSettingChanged",
-        )
+        if connected:
+            # Held on the Theme so it outlives this call; the bus keeps only a
+            # borrowed pointer to the receiver.
+            self._watch = watcher
+        return bool(connected)
 
 
-class _PortalWatcher:
+class _PortalWatcher(QObject):
     """Receives SettingChanged and re-applies when the colour scheme moves."""
 
     def __init__(self, theme: Theme) -> None:
+        super().__init__()
         self._theme = theme
 
-    def onSettingChanged(self, namespace, key, value=None):  # noqa: N802 - D-Bus slot
+    @Slot(str, str, QDBusVariant)
+    def onSettingChanged(self, namespace, key, value):  # noqa: N802 - D-Bus slot
         if str(namespace) != APPEARANCE_NAMESPACE or str(key) != COLOR_SCHEME_KEY:
             return
-        # Re-read the directory as well: a shell that rewrites the palette file
-        # when the scheme changes has done so by now.
-        self._theme.reload()
-        self._theme.apply()
+        try:
+            # Re-read the directory as well: a shell that rewrites the palette
+            # file when the scheme changes has done so by now.
+            self._theme.reload()
+            self._theme.apply()
+        except Exception:
+            # A signal handler that raises crosses back into Qt's C++ stack.
+            return
 
 
 def read_colour_scheme() -> str:

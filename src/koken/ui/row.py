@@ -43,9 +43,15 @@ from ..probes.base import DANGER, WARNING
 ROW_HEIGHT = 32
 LABEL_SHARE = 0.38
 COPY_WIDTH = 22
+COPY_HEIGHT = 22
 CHEVRON_WIDTH = 18
 BODY_TOP_PADDING = 12
 BODY_LEFT_PADDING = 16
+
+# The header's own geometry, shared with the body so the two line up.
+HEADER_LEFT_MARGIN = 12
+HEADER_RIGHT_MARGIN = 8
+HEADER_SPACING = 8
 COPY_CONFIRM_MS = 1000
 
 COLLAPSED_CHEVRON = "▸"
@@ -126,7 +132,11 @@ class CopyButton(QAbstractButton):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("copyButton")
-        self.setFixedWidth(COPY_WIDTH)
+        # Both dimensions, because QAbstractButton does not compute a size hint
+        # of its own: QWidget.sizeHint() answers QSize(-1, -1), and a layout
+        # given that will hand the widget a height of zero - which cannot be
+        # painted into and cannot be clicked.
+        self.setFixedSize(COPY_WIDTH, COPY_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._visible = False
@@ -148,6 +158,12 @@ class CopyButton(QAbstractButton):
     def set_confirmed(self, confirmed: bool) -> None:
         self._confirmed = confirmed
         self.update()
+
+    def sizeHint(self):  # noqa: N802 - Qt naming
+        return QSize(COPY_WIDTH, COPY_HEIGHT)
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt naming
+        return QSize(COPY_WIDTH, COPY_HEIGHT)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if not self._visible:
@@ -176,10 +192,15 @@ class ContentRow(QWidget):
         raw_value: str | None = None,
         body: str = "",
         odd: bool = False,
+        row_key: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.row_id = row_id
+        # What the volatile pass matches on. Deliberately allowed to repeat
+        # across a section, so the widget carries it rather than being found
+        # through a dictionary that could only hold one of them.
+        self.row_key = row_key or row_id
         self._raw_value = raw_value if raw_value is not None else value
         self._body_text = body or ""
         self._expanded = False
@@ -195,12 +216,17 @@ class ContentRow(QWidget):
         self._header = QWidget(self)
         self._header.setObjectName("rowHeader")
         self._header.setFixedHeight(ROW_HEIGHT)
-        self._header.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
+        # Deliberately NOT transparent for mouse events. Qt's hit test skips a
+        # transparent widget *and does not descend into its children*, so
+        # marking this container transparent would make the copy control and
+        # the mount button unreachable by any click. The passive labels below
+        # carry the attribute individually instead; the header itself ignores
+        # mouse events the ordinary way, which propagates them to the row.
         header_layout = QHBoxLayout(self._header)
-        header_layout.setContentsMargins(12, 0, 8, 0)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(
+            HEADER_LEFT_MARGIN, 0, HEADER_RIGHT_MARGIN, 0
+        )
+        header_layout.setSpacing(HEADER_SPACING)
 
         self.label = QLabel(label, self._header)
         self.label.setObjectName("rowLabel")
@@ -296,11 +322,17 @@ class ContentRow(QWidget):
             self._apply_body_margins()
 
     def _apply_body_margins(self) -> None:
-        """Indent the explanation so it lines up with the value column."""
+        """Indent the explanation so it lines up with the value column.
+
+        The value column starts after the header's own left margin and the
+        spacing that follows the label, so both are included; using the label
+        width alone leaves the body four pixels short of the column it is
+        supposed to match.
+        """
         self.body.setContentsMargins(
-            self.label.width() + BODY_LEFT_PADDING,
+            HEADER_LEFT_MARGIN + self.label.width() + HEADER_SPACING + BODY_LEFT_PADDING,
             BODY_TOP_PADDING,
-            16,
+            HEADER_RIGHT_MARGIN,
             BODY_TOP_PADDING,
         )
 
