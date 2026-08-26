@@ -641,6 +641,32 @@ class Theme:
             self._watch = watcher
         return bool(connected)
 
+    def unwatch(self) -> None:
+        """Disconnect the portal watcher. Called once, on the way out.
+
+        Same reasoning as Application._shutdown: a live D-Bus connection into a
+        Python slot is one more thing for Qt to unwind after Python has stopped
+        being able to answer.
+        """
+        watcher = self._watch
+        self._watch = None
+        if watcher is None:
+            return
+        try:
+            from PySide6.QtCore import SLOT
+            from PySide6.QtDBus import QDBusConnection
+
+            QDBusConnection.sessionBus().disconnect(
+                PORTAL_SERVICE,
+                PORTAL_PATH,
+                PORTAL_INTERFACE,
+                "SettingChanged",
+                watcher,
+                SLOT("onSettingChanged(QString,QString,QDBusVariant)"),
+            )
+        except Exception:
+            pass
+
 
 class _PortalWatcher(QObject):
     """Receives SettingChanged and re-applies when the colour scheme moves."""

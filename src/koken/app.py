@@ -107,7 +107,32 @@ class Application(QObject):
         self._set_interval(self.settings.refresh_interval)
 
         self.qt.aboutToQuit.connect(self._save)
+        self.qt.aboutToQuit.connect(self._shutdown)
         return self.qt.exec()
+
+    def _shutdown(self) -> None:
+        """Take the window down while there is still a Python to take it down with.
+
+        PySide destroys any QApplication that is still standing during Python's
+        own finalisation, and Qt sends a close event to every widget it destroys
+        on the way. That event goes through this object's event filter - into an
+        interpreter that has already been shut down - and the process dies with a
+        segmentation fault after doing everything correctly. Nothing is visibly
+        wrong, which is exactly what makes it worth removing: an exit status of
+        139 is what a crash reporter files a bug about.
+
+        Closing the window here, with the event loop still running and the filter
+        removed first, means there is nothing left for that pass to destroy.
+        """
+        window = self.window
+        self.window = None
+        if window is not None:
+            window.removeEventFilter(self)
+            window.hide()
+            window.setParent(None)
+            window.deleteLater()
+        self.theme.unwatch()
+        self.timer.stop()
 
     # -- enumeration -------------------------------------------------------
 
