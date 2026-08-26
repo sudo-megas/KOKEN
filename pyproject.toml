@@ -1,0 +1,64 @@
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "koken"
+version = "1.0"
+description = "Machine Corpus - a hardware and system browser that explains what each value means"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSE-tabler"]
+authors = [{ name = "Megas" }]
+keywords = ["hardware", "sysfs", "system-information", "linux", "qt"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Hardware",
+]
+
+# Deliberately empty. Every runtime dependency is a distribution package, not a
+# Python one: PySide6 ships as python-pyside6 on Arch and as four python3-pyside6.*
+# packages on Debian, and hwdata, udisks2, dmidecode and polkit are not Python
+# packages at all. Declaring PySide6 here would make pip install a second copy
+# alongside the distribution's. See packaging/PKGBUILD and debian/control.
+dependencies = []
+
+[project.scripts]
+koken = "koken.__main__:main"
+
+[project.urls]
+Source = "https://github.com/sudo-megas/KOKEN"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/koken"]
+
+# The explanation corpus, the palettes and the icon subset travel inside the
+# wheel as package data. They are read with importlib.resources and, for the
+# first two, seeded into the user's config directory on first run. Nothing is
+# installed to /usr/share/koken.
+[tool.hatch.build.targets.wheel.sources]
+"src/koken" = "koken"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/koken",
+    "/helper",
+    "/data",
+    "/packaging",
+    "/debian",
+    "/README.md",
+    "/LICENSE",
+    "/LICENSE-tabler",
+    "/CORE.md",
+    "/STEP.md",
+]

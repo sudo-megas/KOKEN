@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Arch build output
+packaging/pkg/
+packaging/src/
+packaging/*.pkg.tar.zst
+packaging/*.log
+
+# Debian build output
+debian/.debhelper/
+debian/koken/
+debian/files
+debian/*.substvars
+debian/*.debhelper.log
+debian/debhelper-build-stamp
+../koken_*.deb
+../koken_*.buildinfo
+../koken_*.changes
