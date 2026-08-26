@@ -187,6 +187,10 @@ class Application(QObject):
     def _tick(self) -> None:
         if self.window is None or not self._window_visible():
             return
+        # About is on the content area, so there is no section to sample and
+        # nothing was read - which means the footer must not claim otherwise.
+        if self.window.about_visible():
+            return
         self.window.sample_visible()
         self._stamp()
 

@@ -25,13 +25,23 @@ Only the section on screen is sampled. Reading every network counter and every
 PCI power state on the interval, for sections nobody is looking at, is the same
 waste as leaving the timer running for a minimised window - and crossing to a
 section samples it at once, so what is on screen is never stale.
+
+About is the one thing here that is not a section. CORE 14 allows a footer
+control that switches the content area, and forbids a dialog, so About is a
+second scroll area that takes the content area's place while it is up and hands
+it straight back - to the About button pressed again, to any tab pressed with a
+mouse, or to any keyboard selection. Nothing floats and nothing opens.
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QLabel,
     QMainWindow,
     QScrollArea,
     QSizePolicy,
@@ -41,13 +51,95 @@ from PySide6.QtWidgets import (
 
 from ..probes import BRANCHES
 from ..probes.base import Section
+from ..probes.system import about_rows
 from .footer import Footer
 from .row import LABEL_SHARE, ContentRow
-from .tabrow import TabRow
+from .tabrow import Tab, TabRow
 
 DEFAULT_SIZE = (1100, 760)
 MINIMUM_SIZE = (720, 520)
 TAB_ROW_GAP = 12
+
+# CORE 13.7: the supplied artwork, scaled down with a high-quality filter and
+# never masked, framed, cropped or written over. Both packages install it into
+# the hicolor tree at these sizes; a source checkout has the 2048px original
+# and nothing else; a bare wheel has neither, and then About simply has no
+# picture on it.
+ICON_NAME = "koken"
+ICON_HICOLOR_SIZES = (512, 256, 128)
+ICON_DISPLAY_PX = 128
+ABOUT_ICON_MARGIN = 24
+
+
+def data_dirs() -> list[Path]:
+    """The XDG data directories, in search order, honouring the environment."""
+    dirs: list[Path] = []
+    home = os.environ.get("XDG_DATA_HOME", "").strip()
+    dirs.append(Path(home) if home.startswith("/") else Path.home() / ".local" / "share")
+    raw = os.environ.get("XDG_DATA_DIRS", "").strip() or "/usr/local/share:/usr/share"
+    for part in raw.split(":"):
+        part = part.strip()
+        if part.startswith("/"):
+            dirs.append(Path(part))
+    return dirs
+
+
+def icon_candidates() -> list[Path]:
+    """Every place the application icon may be, largest size first.
+
+    The installed packages come first because they carry a copy scaled for the
+    purpose; the 2048px original is last and only exists in a checkout. Nothing
+    here reads package data: the icon is not inside the wheel, it is installed
+    to the icon theme by the distribution package.
+    """
+    candidates: list[Path] = []
+    for size in ICON_HICOLOR_SIZES:
+        for directory in data_dirs():
+            candidates.append(
+                directory
+                / "icons"
+                / "hicolor"
+                / f"{size}x{size}"
+                / "apps"
+                / f"{ICON_NAME}.png"
+            )
+    try:
+        # A source checkout: src/koken/ui/window.py -> repository root.
+        candidates.append(
+            Path(__file__).resolve().parents[3] / "data" / "icons" / f"{ICON_NAME}.png"
+        )
+    except (IndexError, OSError):
+        pass
+    return candidates
+
+
+def load_application_icon() -> QPixmap | None:
+    """The artwork at the largest size available, or None.
+
+    None is a normal answer - a wheel installed on its own has no icon anywhere
+    on disk - and the caller draws nothing at all rather than a placeholder, a
+    frame, or a line of text apologising for it.
+    """
+    for candidate in icon_candidates():
+        try:
+            if not candidate.is_file():
+                continue
+            pixmap = QPixmap(str(candidate))
+        except (OSError, ValueError):
+            continue
+        if not pixmap.isNull():
+            return pixmap
+    # Last resort: whatever the icon theme answers to the name. Reached when
+    # the icon is installed somewhere the search above does not know about.
+    try:
+        icon = QIcon.fromTheme(ICON_NAME)
+        if not icon.isNull():
+            pixmap = icon.pixmap(ICON_HICOLOR_SIZES[0], ICON_HICOLOR_SIZES[0])
+            if not pixmap.isNull():
+                return pixmap
+    except Exception:
+        return None
+    return None
 
 
 class Window(QMainWindow):
@@ -75,6 +167,17 @@ class Window(QMainWindow):
         # leaving an orphan in the layout that is never resized and never
         # sampled.
         self._row_widgets: list[ContentRow] = []
+        # The About view's rows, kept apart from the section rows: the volatile
+        # pass must never touch them and they are never rebuilt.
+        self._about_widgets: list[ContentRow] = []
+        self._about_built = False
+        # Whether About is the content area, kept as state rather than read
+        # back from the widget. A widget inside a window that has not been
+        # shown yet answers isVisible() with False however it was set, which
+        # would leave the toggle unable to tell "About is up" from "the window
+        # is not on screen" - and stuck in whichever it guessed.
+        self._about_active = False
+        self._refreshing = False
         self._current_branch: str | None = None
         self._mount_row_factory = None
 
@@ -109,6 +212,22 @@ class Window(QMainWindow):
         self.scroll.setWidget(self.content)
         outer.addWidget(self.scroll, 1)
 
+        # The About area. It takes the same place in the same layout, and only
+        # one of the two is ever visible, so switching between them moves
+        # nothing else in the window. Its contents are built the first time it
+        # is asked for: About reads a 35 kB licence file and a two-megapixel
+        # icon, and a launch should not pay for a page nobody may open.
+        self.about_scroll = QScrollArea()
+        self.about_scroll.setObjectName("contentScroll")
+        self.about_scroll.setWidgetResizable(True)
+        self.about_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.about_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.about_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.about_scroll.setVisible(False)
+        outer.addWidget(self.about_scroll, 1)
+
         self.footer = Footer()
         outer.addWidget(self.footer)
 
@@ -118,12 +237,16 @@ class Window(QMainWindow):
         self.row2.selected.connect(self._on_probe_selected)
         self.row3.selected.connect(self._on_section_selected)
         self.footer.interval_changed.connect(self.interval_changed)
+        # The button and F5 are the same path, not two of them.
+        self.footer.refresh_pressed.connect(self.request_refresh)
+        self.footer.about_toggled.connect(self.set_about_visible)
 
         self._install_shortcuts()
 
         self.row1.set_entries(
             [(branch_id, label, None) for branch_id, label, _probes in BRANCHES]
         )
+        self._hook_tabs(self.row1)
 
     # -- keyboard ----------------------------------------------------------
 
@@ -131,7 +254,7 @@ class Window(QMainWindow):
         for index, (branch_id, _label, _probes) in enumerate(BRANCHES, start=1):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index}"), self)
             shortcut.activated.connect(
-                lambda name=branch_id: self.row1.set_current(name, notify=True)
+                lambda name=branch_id: self._select_branch(name)
             )
 
         for sequence, delta in (("Left", -1), ("Right", 1)):
@@ -139,7 +262,7 @@ class Window(QMainWindow):
             shortcut.activated.connect(lambda step=delta: self.row3.move(step))
 
         refresh = QShortcut(QKeySequence("F5"), self)
-        refresh.activated.connect(self.refresh_requested)
+        refresh.activated.connect(self.request_refresh)
 
         quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
         quit_shortcut.activated.connect(self.quit_requested)
@@ -203,6 +326,7 @@ class Window(QMainWindow):
     # -- the cascade -------------------------------------------------------
 
     def _on_branch_selected(self, branch_id: str) -> None:
+        self._exit_about()
         self._show_branch(branch_id)
         self.branch_changed.emit(branch_id)
 
@@ -218,6 +342,7 @@ class Window(QMainWindow):
             current=wanted_probe,
         )
         self.row2.blockSignals(False)
+        self._hook_tabs(self.row2)
 
         current = self.row2.current()
         if current is not None:
@@ -227,6 +352,7 @@ class Window(QMainWindow):
             self._build_rows([])
 
     def _on_probe_selected(self, probe_id: str) -> None:
+        self._exit_about()
         self._show_probe(probe_id)
 
     def _show_probe(self, probe_id: str) -> None:
@@ -245,6 +371,7 @@ class Window(QMainWindow):
             current=wanted_section,
         )
         self.row3.blockSignals(False)
+        self._hook_tabs(self.row3)
 
         current = self.row3.current()
         if current is not None:
@@ -254,6 +381,7 @@ class Window(QMainWindow):
             self._build_rows([])
 
     def _on_section_selected(self, section_id: str) -> None:
+        self._exit_about()
         self._show_section(section_id)
 
     def _show_section(self, section_id: str) -> None:
@@ -378,8 +506,9 @@ class Window(QMainWindow):
             return ""
         return self._explanations.long(row.id) or ""
 
-    def _label_width(self) -> int:
-        width = self.scroll.viewport().width() or self.width()
+    def _label_width(self, scroll: QScrollArea | None = None) -> int:
+        area = self.scroll if scroll is None else scroll
+        width = area.viewport().width() or self.width()
         return int(width * LABEL_SHARE)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -401,11 +530,18 @@ class Window(QMainWindow):
         width = self._label_width()
         for widget in self._row_widgets:
             widget.set_label_width(width)
+        about_width = self._label_width(self.about_scroll)
+        for widget in self._about_widgets:
+            widget.set_label_width(about_width)
 
     # -- the volatile pass -------------------------------------------------
 
     def sample_visible(self) -> None:
         """Update the rows on screen in place. Never rebuilds anything."""
+        if self.about_visible():
+            # Nothing on screen is a section. CORE 9 samples what is being
+            # looked at, and right now that is a licence.
+            return
         probe = self.current_probe()
         section_id = self.current_section_id()
         if probe is None or section_id is None or not self._row_widgets:
@@ -421,6 +557,148 @@ class Window(QMainWindow):
                 widget.set_value(
                     self._glossed(row), row.severity, raw_value=row.value
                 )
+
+    # -- refreshing --------------------------------------------------------
+
+    def request_refresh(self) -> None:
+        """Ask for the static pass. F5 and the footer button both land here.
+
+        The pass runs on this thread and takes a visible moment on a machine
+        with several disks, so the button says so and stops accepting presses
+        for the duration - a control that looks pressable while it is working
+        gets pressed again, and the second press is a second full enumeration.
+
+        The guard is not paranoia either: the footer button is disabled while
+        this runs, but F5 is not, and holding it down repeats.
+        """
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self.footer.set_refreshing(True)
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        try:
+            self.refresh_requested.emit()
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+            self.footer.set_refreshing(False)
+            self._refreshing = False
+
+    # -- about -------------------------------------------------------------
+
+    def about_visible(self) -> bool:
+        return self._about_active
+
+    def set_about_visible(self, visible: bool) -> None:
+        """Swap the content area for About, or back. Never opens anything."""
+        visible = bool(visible)
+        if visible == self._about_active:
+            # Still worth keeping the button honest: this is also how the
+            # window says no to a state it is already in.
+            self.footer.set_about_active(visible)
+            return
+        if visible:
+            self._build_about()
+        self._about_active = visible
+        # Hidden first, so the layout is never asked to fit both at once.
+        (self.scroll if visible else self.about_scroll).setVisible(False)
+        (self.about_scroll if visible else self.scroll).setVisible(True)
+        self.footer.set_about_active(visible)
+        self._apply_label_widths()
+        if visible:
+            self.about_scroll.verticalScrollBar().setValue(0)
+        else:
+            # The timer left the section alone while About was up, so what is
+            # coming back could be a minute stale.
+            self.sample_visible()
+
+    def _exit_about(self) -> None:
+        if self._about_active:
+            self.set_about_visible(False)
+
+    def _select_branch(self, branch_id: str) -> None:
+        """Ctrl+1..4. Leaves About even for the branch already selected."""
+        self._exit_about()
+        self.row1.set_current(branch_id, notify=True)
+
+    def _hook_tabs(self, row: TabRow) -> None:
+        """Leave About on any tab press, including a press on the current tab.
+
+        The row's own ``selected`` signal is not enough on its own: it reports
+        a change, and clicking the tab you are already on is not one. Somebody
+        who opened About while on Hardware and then clicks Hardware to get back
+        has pressed exactly that tab, and would otherwise be pressing a tab
+        that already looks selected and watching nothing happen.
+        """
+        for tab in row.findChildren(Tab):
+            tab.clicked.connect(lambda _checked=False: self._exit_about())
+
+    def _build_about(self) -> None:
+        """CORE 14, once. Maker, version, date, address, SPDX, licence text.
+
+        The rows are the same widget every other row in the application uses,
+        so the licence opens in place under its own row and the values carry
+        the same copy control. The contents are not restated here - they come
+        from the one function that builds them.
+        """
+        if self._about_built:
+            return
+        self._about_built = True
+
+        panel = QWidget()
+        panel.setObjectName("content")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        pixmap = load_application_icon()
+        if pixmap is not None:
+            layout.addWidget(
+                self._icon_label(pixmap), 0, Qt.AlignmentFlag.AlignHCenter
+            )
+
+        for index, row in enumerate(about_rows()):
+            widget = ContentRow(
+                row_id=row.id,
+                label=row.label,
+                value=self._glossed(row),
+                severity=row.severity,
+                raw_value=row.value,
+                body=self._body_for(row),
+                odd=bool(index % 2),
+                row_key=row.key,
+            )
+            widget.set_label_width(self._label_width(self.about_scroll))
+            widget.toggled_expansion.connect(self._apply_label_widths)
+            layout.addWidget(widget)
+            self._about_widgets.append(widget)
+
+        layout.addStretch(1)
+        self.about_scroll.setWidget(panel)
+
+    def _icon_label(self, pixmap: QPixmap) -> QLabel:
+        """The artwork, scaled down. No mask, no frame, no shadow, no text.
+
+        Scaled to the device's pixel ratio and told what that ratio is, so a
+        HiDPI screen gets the detail the 2048px original has rather than a
+        128px image stretched over it.
+        """
+        label = QLabel()
+        label.setObjectName("aboutIcon")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setContentsMargins(0, ABOUT_ICON_MARGIN, 0, ABOUT_ICON_MARGIN)
+        ratio = self.devicePixelRatioF() or 1.0
+        edge = max(1, int(round(ICON_DISPLAY_PX * ratio)))
+        scaled = pixmap.scaled(
+            edge,
+            edge,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        scaled.setDevicePixelRatio(ratio)
+        label.setPixmap(scaled)
+        return label
+
+    # -- the footer --------------------------------------------------------
 
     def apply_interval(self, seconds: int) -> None:
         self.footer.set_interval(seconds)

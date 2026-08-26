@@ -5,12 +5,17 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-"""The operating system: what is running, which distribution it is, and About.
+"""The operating system: what is running, and which distribution it is.
 
-The About section lives here rather than in a dialog, because KOKEN has no
-dialogs. It is an ordinary row 3 entry with ordinary rows, and the licence text
-sits in the expansion body of one of them - the same in-place expansion every
-other row in the application uses.
+About is built here too, by :func:`about_rows`, but it is no longer one of this
+probe's sections. CORE 14 offers two forms, a fifth row 3 entry or a footer
+control that switches the content area, and the second was chosen: About sits
+behind a footer toggle and exists in exactly one place. The rows themselves are
+unchanged, licence text and all, and the licence still arrives as an ordinary
+expansion body rather than as a window - KOKEN has no dialogs.
+
+The row ids keep their ``system.os.`` prefix. They are explanation keys, and a
+key is a name for a value, not a route to it.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from .base import (
     NOT_REPORTED,
     VOLATILE,
     Probe,
+    Row,
     Section,
     fmt_duration,
     fmt_list,
@@ -99,7 +105,7 @@ class SystemProbe(Probe):
     label = "Operating system"
 
     def sections(self) -> list[Section]:
-        return [self._overview(), self._distribution(), self._init(), self._about()]
+        return [self._overview(), self._distribution(), self._init()]
 
     # -- overview ---------------------------------------------------------
 
@@ -284,52 +290,67 @@ class SystemProbe(Probe):
         )
         return section
 
-    # -- about ------------------------------------------------------------
-
-    def _about(self) -> Section:
-        """CORE section 14. Not a dialog, not a popup - a row 3 entry."""
-        section = Section(id="about", label="About")
-        section.add(self.row("about_name", "Name", f"KÖKEN — {SUBTITLE}"))
-        section.add(self.row("about_maker", "Maker", MAKER))
-        section.add(self.row("about_version", "Version", f"v{VERSION}"))
-        section.add(self.row("about_released", "Released", RELEASE_DATE))
-        section.add(self.row("about_source", "Source", SOURCE))
-        section.add(self.row("about_licence", "Licence", SPDX))
-
-        licence = find_licence_text()
-        if licence:
-            section.add(
-                self.row(
-                    "about_licence_text",
-                    "Licence text",
-                    "GNU General Public License, version 3 — expand to read in full",
-                    body=licence,
-                )
-            )
-        else:
-            section.add(
-                self.row(
-                    "about_licence_text",
-                    "Licence text",
-                    "The full text ships with the package and could not be found on "
-                    "this machine. It is in the LICENSE file alongside the source.",
-                )
-            )
-        section.add(
-            self.row(
-                "about_privacy",
-                "What it does",
-                "Reads this machine and explains what it finds. It opens no network "
-                "connection of any kind, and the only thing it ever changes is "
-                "mounting or unmounting a filesystem when you ask it to.",
-            )
-        )
-        return section
-
     # -- volatile pass ----------------------------------------------------
 
     def sample(self) -> dict[str, list]:
         return {"overview": self._uptime_rows()}
+
+
+def about_rows() -> list[Row]:
+    """CORE section 14, and the only place its contents are written down.
+
+    Maker, version, release date, source address, the SPDX identifier and the
+    full GPL-3 text, which travels in the last row's expansion body rather than
+    in a value. The address is a string like every other value here: nothing in
+    this application follows a URL, and no row is clickable.
+    """
+
+    def row(field: str, label: str, value: str, body: str = "") -> Row:
+        return Row(
+            id=f"{SystemProbe.branch}.{SystemProbe.id}.{field}",
+            label=label,
+            value=value,
+            body=body,
+        )
+
+    rows = [
+        row("about_name", "Name", f"KÖKEN — {SUBTITLE}"),
+        row("about_maker", "Maker", MAKER),
+        row("about_version", "Version", f"v{VERSION}"),
+        row("about_released", "Released", RELEASE_DATE),
+        row("about_source", "Source", SOURCE),
+        row("about_licence", "Licence", SPDX),
+    ]
+
+    licence = find_licence_text()
+    if licence:
+        rows.append(
+            row(
+                "about_licence_text",
+                "Licence text",
+                "GNU General Public License, version 3 — expand to read in full",
+                body=licence,
+            )
+        )
+    else:
+        rows.append(
+            row(
+                "about_licence_text",
+                "Licence text",
+                "The full text ships with the package and could not be found on "
+                "this machine. It is in the LICENSE file alongside the source.",
+            )
+        )
+    rows.append(
+        row(
+            "about_privacy",
+            "What it does",
+            "Reads this machine and explains what it finds. It opens no network "
+            "connection of any kind, and the only thing it ever changes is "
+            "mounting or unmounting a filesystem when you ask it to.",
+        )
+    )
+    return rows
 
 
 def _hostname() -> str:

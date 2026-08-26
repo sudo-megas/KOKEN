@@ -484,6 +484,34 @@ QToolTip {{
     color: {on_accent};
 }}
 
+/* The Refresh button and the About toggle. About is checkable, and takes the
+   same accent fill a chosen segment or a selected tab takes, so that a control
+   which is currently doing something looks the same wherever it is. */
+#footerButton {{
+    background: {base};
+    border: 1px solid {border};
+    border-radius: 4px;
+    color: {text};
+    padding: 2px 12px;
+    font-size: {size_footer}pt;
+}}
+
+#footerButton:hover {{
+    background: {overlay};
+}}
+
+#footerButton:disabled {{
+    background: {surface};
+    border: 1px solid {border};
+    color: {muted};
+}}
+
+#footerButton[selected="true"] {{
+    background: {accent};
+    border: 1px solid {accent};
+    color: {on_accent};
+}}
+
 /* ---- scrollbars ---------------------------------------------------- */
 
 QScrollBar:vertical {{

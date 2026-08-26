@@ -55,7 +55,11 @@ HELPER_CANDIDATES = (
 AUTH_TIMEOUT_MS = 120_000
 
 # The second is the work itself, which is bounded: two dmidecode calls with a
-# five second limit each, three small file reads, and a debugfs glob.
+# five second limit each, three small file reads, a debugfs glob, and a
+# smartctl pass over the whole disks. The helper holds itself to eighteen
+# seconds and fits the SMART pass into whatever is left of that, so this is a
+# backstop for a helper that has genuinely wedged rather than the limit the
+# helper works to.
 WORK_TIMEOUT_MS = 20_000
 
 # Kept as the old name for anything that passed it in.
@@ -128,6 +132,20 @@ class PrivilegedData:
         return {str(k): v for k, v in value.items() if isinstance(v, dict)}
 
     @property
+    def smart(self) -> dict[str, dict]:
+        """One smartctl report per whole disk, keyed by device node.
+
+        Empty whenever the read did not happen at all - access declined, an
+        older helper, or smartmontools not installed - so a caller that asks
+        for a device it did not get back is answered the same way as one asking
+        on a machine where the helper never ran.
+        """
+        value = self._payload.get("smart")
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)}
+
+    @property
     def helper_errors(self) -> list[str]:
         """What the helper could not read. A partial read is a normal outcome."""
         value = self._payload.get("errors")
@@ -140,6 +158,11 @@ class PrivilegedData:
 
     def firmware_for_card(self, index: str | int) -> dict:
         return self.gpu_firmware.get(str(index), {})
+
+    def smart_for_device(self, node: str) -> dict:
+        """One drive's smartctl report, or an empty dict for anything else."""
+        report = self.smart.get(str(node))
+        return report if isinstance(report, dict) else {}
 
     def text(self, value, fallback: str = "") -> str:
         """A privileged value as text, or the standard refusal line.

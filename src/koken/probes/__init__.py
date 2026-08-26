@@ -30,6 +30,7 @@ from .pci import PciProbe
 from .power import PowerProbe
 from .security import SecurityProbe
 from .sensors import SensorsProbe
+from .smart import SmartProbe
 from .system import SystemProbe
 from .usb import UsbProbe
 from .volumes import VolumesProbe
@@ -49,7 +50,7 @@ BRANCHES = (
     (
         "storage",
         "Storage",
-        (DisksProbe, VolumesProbe, FilesystemsProbe),
+        (DisksProbe, VolumesProbe, SmartProbe, FilesystemsProbe),
     ),
     (
         "peripherals",

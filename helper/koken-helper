@@ -14,7 +14,7 @@
 
 """The only part of KOKEN that runs as root, for well under a second.
 
-It reads three things the kernel will not show an ordinary user, prints one
+It reads four things the kernel will not show an ordinary user, prints one
 JSON object on stdout, and exits. It imports nothing from ``koken``: it is a
 separate program that happens to ship in the same package, and it must stay
 runnable on its own::
@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 SCHEMA_VERSION = 1
 
@@ -50,10 +51,40 @@ DMIDECODE_CANDIDATES = (
     "/bin/dmidecode",
 )
 
+# The same reasoning, and the same two directories first: smartctl is an sbin
+# program on every distribution that still separates them.
+SMARTCTL_CANDIDATES = (
+    "/usr/sbin/smartctl",
+    "/usr/bin/smartctl",
+    "/sbin/smartctl",
+    "/bin/smartctl",
+)
+
 # Read from /sys/class/dmi/id/. Root-only, every one of them.
 SERIAL_FILES = ("product_serial", "board_serial", "product_uuid")
 
 DMIDECODE_TIMEOUT = 5
+
+# Three budgets, and they exist because the caller has one. privileged.py
+# allows 20 seconds for the work phase - everything after the helper writes its
+# ready marker - and kills the helper when that runs out. A kill loses the DMI
+# table as well as the SMART table, so the SMART pass runs last and is fitted
+# into what is left rather than being allowed to overrun.
+#
+#   SMARTCTL_TIMEOUT   one device. An awake drive answers in well under a
+#                      second; a drive that has to be woken can take five, and
+#                      -n standby means this helper never wakes one.
+#   SMART_BUDGET       the whole SMART pass, however many drives there are.
+#   HELPER_BUDGET      the wall clock from the start of collect(). Two seconds
+#                      under the caller's 20 so the JSON is always written.
+#
+# Worst case: dmidecode wedges twice at 5 seconds each, the SMART pass then
+# gets 18 - 10 = 8 seconds, and the helper prints at about 18. Ordinary case:
+# dmidecode answers in 30 ms and the SMART pass has its full 8 seconds for as
+# many drives as fit, two seconds each.
+SMARTCTL_TIMEOUT = 4
+SMART_BUDGET = 8
+HELPER_BUDGET = 18
 
 
 # The one line that genuinely opens a record. Field lines are indented, so
@@ -243,7 +274,275 @@ def read_gpu_firmware(errors):
     return result
 
 
+# ==========================================================================
+# SMART
+# ==========================================================================
+#
+# udisks2 reads SMART over D-Bus and KOKEN uses it for the health verdict, the
+# temperature and the power-on hours. It cannot supply the per-attribute table:
+# SmartGetAttributes returns a(ysqiiixia{sv}) for ATA and a{sv} for NVMe, Qt
+# maps both to QDBusArgument, and PySide6 cannot read one at all. smartctl is
+# the second route, it is optional, and this is the only place it is run.
+
+
+def find_smartctl():
+    for candidate in SMARTCTL_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+# Everything a whole disk can be called, and nothing that would let a crafted
+# name out of /dev. Kernel block names cannot contain a slash in the first
+# place; requiring the first character to be alphanumeric also means no name
+# here can ever be read by smartctl as an option.
+_BLOCK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+# Virtual block devices, and one that is real but must not be touched. loop,
+# ram, zram, dm-, md and zd have no drive underneath them to ask; sr is an
+# optical drive, and probing one spins up whatever disc is in it.
+SKIP_PREFIXES = ("loop", "ram", "zram", "dm-", "md", "sr", "fd", "nbd", "zd")
+
+
+def list_disk_devices():
+    """Whole disks under /sys/class/block, partitions and virtual devices out.
+
+    Enumerated here rather than asked of smartctl, because ``smartctl --scan``
+    opens every device it finds to decide what it is, and that is exactly the
+    thing this pass is trying not to do to a sleeping drive.
+    """
+    names = []
+    try:
+        entries = sorted(os.listdir("/sys/class/block"))
+    except OSError:
+        return names
+    for name in entries:
+        if not _BLOCK_NAME.match(name) or name.startswith(SKIP_PREFIXES):
+            continue
+        # A partition carries a `partition` file. A whole disk does not.
+        if os.path.exists("/sys/class/block/%s/partition" % name):
+            continue
+        names.append(name)
+    return names
+
+
+def smartctl_arguments(binary, node):
+    """``smartctl --json=c [-n standby] --all <device>``.
+
+    ``--json=c`` because the JSON schema is versioned and stable and the text
+    output is neither, and because the compact form is one line rather than a
+    thousand.
+
+    ``-n standby`` because a hardware browser must not spin a laptop's disk up.
+    It tells smartctl to look at the power mode first and give up if the drive
+    is in STANDBY or SLEEP, which costs one command that does not wake it. It
+    is deliberately not passed to an NVMe device: NVMe has no ATA power mode to
+    check, the option would do nothing there, and not passing it means a change
+    in how smartctl treats an option it cannot apply cannot cost the NVMe read.
+    """
+    arguments = [binary, "--json=c"]
+    if not os.path.basename(node).startswith("nvme"):
+        arguments.extend(("-n", "standby"))
+    arguments.extend(("--all", node))
+    return arguments
+
+
+def _messages_of(report):
+    """``smartctl.messages`` as plain strings, whatever shape they arrive in."""
+    block = report.get("smartctl")
+    items = block.get("messages") if isinstance(block, dict) else None
+    out = []
+    for item in items or []:
+        text = item.get("string") if isinstance(item, dict) else item
+        if text:
+            out.append(str(text).strip())
+    return out
+
+
+def parse_attributes(report):
+    """``ata_smart_attributes.table`` trimmed to the columns KOKEN shows.
+
+    The raw value is taken as smartctl's own rendering of it where there is
+    one. Raw fields are vendor-defined and frequently several numbers packed
+    into one 48-bit field - a temperature with its own minimum and maximum, a
+    head-flying-hours count with a separate spin-up count - and smartctl's
+    string is the only thing that unpacks them correctly per vendor.
+    """
+    table = report.get("ata_smart_attributes")
+    entries = table.get("table") if isinstance(table, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("raw") if isinstance(entry.get("raw"), dict) else {}
+        flags = entry.get("flags") if isinstance(entry.get("flags"), dict) else {}
+        rendered = raw.get("string")
+        if rendered in (None, ""):
+            rendered = raw.get("value")
+        out.append(
+            {
+                "id": entry.get("id"),
+                "name": entry.get("name"),
+                "value": entry.get("value"),
+                "worst": entry.get("worst"),
+                "thresh": entry.get("thresh"),
+                "when_failed": entry.get("when_failed") or "",
+                "raw": rendered,
+                "prefail": bool(flags.get("prefailure")),
+            }
+        )
+    return out
+
+
+def summarise_smart(report):
+    """One device's smartctl report, trimmed to what KOKEN renders.
+
+    The whole ``--all`` document is tens of kilobytes per drive, most of it
+    error and self-test logs this application does not show. Passing only the
+    table and the health log across keeps the helper's single line of stdout a
+    sensible size on a machine with six drives in it.
+    """
+    block = report.get("smartctl") if isinstance(report.get("smartctl"), dict) else {}
+    device = report.get("device") if isinstance(report.get("device"), dict) else {}
+    status = report.get("smart_status") if isinstance(report.get("smart_status"), dict) else {}
+    log = report.get("nvme_smart_health_information_log")
+
+    attributes = parse_attributes(report)
+    nvme_log = {k: v for k, v in log.items()} if isinstance(log, dict) else {}
+    messages = _messages_of(report)
+    exit_status = block.get("exit_status")
+
+    # smartctl's exit status is a bit field, and most of it is not failure.
+    # Bit 3 is "the drive says it is failing", bits 5 to 7 are "there is
+    # something in the logs" - all of them arrive with a full attribute table
+    # and all of them are exactly what somebody opened this page to see. Only
+    # bit 1, which is both "the device could not be opened" and what
+    # -n standby sets when it declines to wake a drive, means there is no
+    # table, and even then the table is what decides, not the bit.
+    if attributes or nvme_log:
+        state = "ok"
+    elif _looks_asleep(messages):
+        state = "standby"
+    elif isinstance(exit_status, int) and exit_status & 0x03:
+        state = "unreadable"
+    else:
+        state = "empty"
+
+    return {
+        "state": state,
+        "protocol": str(device.get("protocol") or ""),
+        "passed": status.get("passed") if isinstance(status.get("passed"), bool) else None,
+        "exit_status": exit_status if isinstance(exit_status, int) else None,
+        "messages": messages,
+        "attributes": attributes,
+        "nvme_log": nvme_log,
+    }
+
+
+def _looks_asleep(messages):
+    """Whether smartctl said it declined to wake the drive.
+
+    Matched on the words rather than on the exit status, because bit 1 is also
+    "device open failed" and the two deserve completely different sentences on
+    screen. smartctl writes `Device is in STANDBY mode, exit(2)`.
+    """
+    for text in messages:
+        lowered = text.lower()
+        if "standby" in lowered or "sleep mode" in lowered or "low power" in lowered:
+            return True
+    return False
+
+
+def _skipped(reason):
+    return {
+        "state": reason,
+        "protocol": "",
+        "passed": None,
+        "exit_status": None,
+        "messages": [],
+        "attributes": [],
+        "nvme_log": {},
+    }
+
+
+def run_smartctl(binary, node, timeout, errors):
+    try:
+        completed = subprocess.run(
+            smartctl_arguments(binary, node),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        errors.append(
+            "smartctl did not answer for %s within %d seconds, so its SMART "
+            "table was not read" % (node, timeout)
+        )
+        return _skipped("timeout")
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append("smartctl could not be run for %s: %s" % (node, exc))
+        return _skipped("unreadable")
+
+    text = completed.stdout.decode("utf-8", "replace")
+    try:
+        report = json.loads(text)
+    except ValueError:
+        detail = completed.stderr.decode("utf-8", "replace").strip() or text.strip()
+        errors.append(
+            "smartctl did not return JSON for %s: %s" % (node, detail[:200] or "no output")
+        )
+        return _skipped("unreadable")
+    if not isinstance(report, dict):
+        errors.append("smartctl returned something unexpected for %s" % node)
+        return _skipped("unreadable")
+    try:
+        return summarise_smart(report)
+    except Exception as exc:  # a shape nobody anticipated must not end the run
+        errors.append("smartctl output for %s could not be read: %s" % (node, exc))
+        return _skipped("unreadable")
+
+
+def read_smart(errors, deadline):
+    """One entry per whole disk, keyed by device node.
+
+    Keyed by ``/dev/sda`` rather than by ``sda`` because that is what the
+    caller already holds for every disk it has enumerated, and because it is
+    what the person reading the screen sees.
+    """
+    binary = find_smartctl()
+    if binary is None:
+        errors.append(
+            "smartmontools is not installed, so the per-attribute SMART table "
+            "was not read. Everything udisks2 supplies is unaffected."
+        )
+        return {}
+    result = {}
+    for name in list_disk_devices():
+        node = "/dev/" + name
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append(
+                "the time budget ran out before %s, so its SMART table was not read"
+                % node
+            )
+            result[node] = _skipped("skipped")
+            continue
+        result[node] = run_smartctl(
+            binary, node, min(SMARTCTL_TIMEOUT, remaining), errors
+        )
+    return result
+
+
+def smart_deadline(started):
+    """When the SMART pass must stop, whichever limit bites first."""
+    return min(started + HELPER_BUDGET, time.monotonic() + SMART_BUDGET)
+
+
 def collect():
+    started = time.monotonic()
     errors = []
     binary = find_dmidecode()
     payload = {
@@ -254,8 +553,13 @@ def collect():
             "serials": read_serials(errors),
         },
         "gpu_firmware": read_gpu_firmware(errors),
+        "smart": {},
         "errors": errors,
     }
+    # Last, and on what is left of the clock. Everything above is already in
+    # the payload by this point, so a SMART pass that runs out of time costs
+    # the SMART table and nothing else.
+    payload["smart"] = read_smart(errors, smart_deadline(started))
     return payload
 
 

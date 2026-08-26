@@ -11,8 +11,15 @@ Most of a drive is readable straight out of ``/sys/class/block``. SMART is not:
 the kernel exposes no SMART interface at all, and reading it means either
 talking ATA pass-through as root or asking something that already does. udisks2
 already does, over D-Bus, with its own polkit policy, for both ATA and NVMe.
-Using it is what lets this application avoid both a privileged SMART path of
-its own and a dependency on smartmontools.
+Using it is what lets this application avoid a privileged SMART path of its
+own, and it is where every SMART row in this file comes from.
+
+The headline values stay here - the health verdict, temperature, power-on
+hours, bad sectors, the self-test result - because somebody looking at a drive
+should see at a glance whether it is failing. The per-attribute table is a
+different thing: thirty rows that would bury everything else in this section.
+It lives in :mod:`koken.probes.smart`, which is the Storage branch's third row
+2 tab, and which is the only place attributes are rendered.
 
 The D-Bus layer below is shared with :mod:`koken.probes.volumes`, which needs
 the same object graph to find each partition's filesystem and its object path.
@@ -498,38 +505,35 @@ class Udisks2:
                 out.append(path)
         return out
 
-    def smart_attributes(self, drive_path: str) -> tuple[list, str]:
-        """The per-attribute SMART table, and a note when there is not one.
+    def smart_attributes(self, drive_path: str) -> list[dict]:
+        """The per-attribute SMART table, if this binding can read it.
 
-        ATA answers with an array of structures, which this binding hands back
-        as a container it cannot unpack; NVMe answers with a flat dictionary,
-        which it can. Both are attempted, and neither failing is an error worth
-        showing - the headline SMART values come from the interface properties
-        either way.
+        Asked for first, and on every machine so far it comes back empty:
+        ``SmartGetAttributes`` returns ``a(ysqiiixia{sv})`` for ATA and
+        ``a{sv}`` for NVMe, Qt maps both to ``QDBusArgument``, and this binding
+        cannot read one. The call is still made rather than assumed away,
+        because it is the route with no extra dependency behind it and it costs
+        one round trip to find out. :mod:`koken.probes.smart` renders whatever
+        this returns and falls back to smartctl when it returns nothing.
+
+        The entries are shaped exactly like the helper's, so there is one
+        renderer rather than two.
         """
         if not self.available:
-            return [], ""
+            return []
         if self.has_interface(drive_path, IFACE_NVME):
             reply = self._call(drive_path, IFACE_NVME, "SmartGetAttributes", ({},))
             arguments = reply.arguments() if reply is not None else []
             if arguments and isinstance(arguments[0], dict):
-                return sorted(
-                    (str(key), _unwrap(value)) for key, value in arguments[0].items()
-                ), ""
-            return [], ""
+                return _nvme_attribute_entries(arguments[0])
+            return []
 
         if self.has_interface(drive_path, IFACE_ATA):
             reply = self._call(drive_path, IFACE_ATA, "SmartGetAttributes", ({},))
             arguments = reply.arguments() if reply is not None else []
             if arguments and isinstance(arguments[0], list):
-                return _ata_attribute_rows(arguments[0]), ""
-            return (
-                [],
-                "The per-attribute table is not shown: udisks2 returns it in a form "
-                "this Qt binding cannot unpack. The values above come from the same "
-                "SMART data.",
-            )
-        return [], ""
+                return _ata_attribute_entries(arguments[0])
+        return []
 
 
 # -- demarshalling helpers -------------------------------------------------
@@ -680,21 +684,46 @@ def _smart_was_read(properties: dict) -> bool:
     return isinstance(updated, (int, float)) and updated > 0
 
 
-def _ata_attribute_rows(entries) -> list:
-    """``a(ysqiiixia{sv})`` when the binding does unpack it."""
+def _ata_attribute_entries(entries) -> list[dict]:
+    """``a(ysqiiixia{sv})`` when the binding does unpack it.
+
+    The tuple is id, name, flags, value, worst, threshold, pretty, pretty_unit,
+    expansion. udisks2's `pretty` is the raw value already decoded per vendor,
+    which is the same thing smartctl's ``raw.string`` carries, so both sources
+    fill the same field here.
+    """
     out = []
     for entry in entries:
         try:
-            identifier, name, _flags, value, worst, threshold, pretty, unit = entry[:8]
+            identifier, name, _flags, value, worst, threshold, pretty, _unit = entry[:8]
         except (TypeError, ValueError, IndexError):
             continue
         out.append(
-            (
-                f"{int(identifier)} {name}",
-                f"value {value}, worst {worst}, threshold {threshold}, raw {pretty}",
-            )
+            {
+                "id": int(identifier),
+                "name": str(name),
+                "value": value,
+                "worst": worst,
+                "thresh": threshold,
+                "when_failed": "",
+                "raw": pretty,
+                "prefail": False,
+            }
         )
     return out
+
+
+def _nvme_attribute_entries(mapping) -> list[dict]:
+    """``a{sv}`` when the binding does unpack it.
+
+    NVMe has no attribute table. What udisks2 answers with here is the health
+    log as a flat dictionary, so it is carried as one rather than being forced
+    into columns it does not have.
+    """
+    return [
+        {"name": str(key), "raw": _unwrap(value)}
+        for key, value in sorted(mapping.items())
+    ]
 
 
 # A single client per enumeration pass. Both disks.py and volumes.py want the
@@ -736,6 +765,42 @@ def set_client(replacement: Udisks2 | None) -> None:
 
 
 # ==========================================================================
+# Enumeration
+# ==========================================================================
+
+
+def find_disks() -> list[dict]:
+    """Every whole physical block device, one record each.
+
+    Module level rather than a method because :mod:`koken.probes.smart` builds
+    its row 3 from the same list, and two tabs in the same branch disagreeing
+    about which drives exist would be a worse fault than either of them being
+    wrong.
+    """
+    disks = []
+    for path in list_dir(BLOCK_ROOT):
+        # A partition carries a `partition` file; volumes.py owns those.
+        if path_exists(path / "partition"):
+            continue
+        name = path.name
+        if name.startswith(("loop", "ram", "zram")):
+            continue
+        device = path / "device"
+        disks.append(
+            {
+                "name": name,
+                "path": path,
+                "device": device,
+                "node": f"/dev/{name}",
+                "sectors": read_int(path / "size"),
+                "rotational": read_int(path / "queue/rotational"),
+                "removable": read_int(path / "removable"),
+            }
+        )
+    return disks
+
+
+# ==========================================================================
 # The probe
 # ==========================================================================
 
@@ -752,27 +817,7 @@ class DisksProbe(Probe):
     # -- enumeration ------------------------------------------------------
 
     def _find_disks(self) -> list[dict]:
-        disks = []
-        for path in list_dir(BLOCK_ROOT):
-            # A partition carries a `partition` file; volumes.py owns those.
-            if path_exists(path / "partition"):
-                continue
-            name = path.name
-            if name.startswith(("loop", "ram", "zram")):
-                continue
-            device = path / "device"
-            disks.append(
-                {
-                    "name": name,
-                    "path": path,
-                    "device": device,
-                    "node": f"/dev/{name}",
-                    "sectors": read_int(path / "size"),
-                    "rotational": read_int(path / "queue/rotational"),
-                    "removable": read_int(path / "removable"),
-                }
-            )
-        return disks
+        return find_disks()
 
     def sections(self) -> list[Section]:
         disks = self._find_disks()
@@ -1106,7 +1151,6 @@ class DisksProbe(Probe):
         if selftest:
             rows.append(self.row("selftest", "Last self test", str(selftest)))
 
-        rows.extend(self._attribute_rows(udisks, drive_path))
         return rows
 
     def _nvme_smart_rows(self, udisks, drive_path) -> list:
@@ -1170,7 +1214,6 @@ class DisksProbe(Probe):
                     "nvme_unallocated", "Unallocated capacity", fmt_bytes(unallocated)
                 )
             )
-        rows.extend(self._attribute_rows(udisks, drive_path))
         return rows
 
     def _temperature_row(self, kelvin):
@@ -1185,22 +1228,6 @@ class DisksProbe(Probe):
             tier=VOLATILE,
             severity=WARNING if celsius >= 60 else "normal",
         )
-
-    def _attribute_rows(self, udisks, drive_path) -> list:
-        attributes, note = udisks.smart_attributes(drive_path)
-        rows = []
-        if note:
-            rows.append(self.row("smart_table", "Attribute table", note))
-        for name, value in attributes:
-            rows.append(
-                self.row(
-                    "smart_attribute",
-                    f"  {name}",
-                    str(value),
-                    key=f"attr{name}",
-                )
-            )
-        return rows
 
     # -- partitions -------------------------------------------------------
 
