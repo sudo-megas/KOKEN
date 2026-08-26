@@ -554,4 +554,35 @@ git push origin v1.0
 Rewrite this section as work proceeds. Keep it short — what is done, what changed
 from the plan, and what is next.
 
-- Not started.
+**Done.** All of §3, items 1 to 26. 22 probe modules, the three tab rows, the
+content row, the theme, the explanation corpus (72 entries), both packages and
+the release workflow. §5 checks 1 to 27 all pass; the five mount checks were run
+against the stub call layer §7.8 asks for, not against a live udisks2.
+
+**Changed from the plan.**
+
+- `src/koken/ui/__init__.py` was added. §2 lists it for `probes/` but not for
+  `ui/`; without it `koken.ui` is a namespace package, which is fragile in a
+  wheel.
+- §6.2 says `debian/install` places the explanations; §6.1 and `CORE.md` §16 say
+  the corpus is package data and is not installed to a system path. CORE wins,
+  so it is not installed separately.
+- `Row` gained two fields. `body` lets the About section carry the GPL text as
+  its own expansion rather than putting 35 kB of licence into a user-editable
+  TOML. `gloss` lets a probe supply an inline gloss that depends on the machine,
+  which is what makes a row read `16 — SMT enabled` while still copying `16`; a
+  static `short` in the corpus could only ever say one of the two.
+- `chip` does not exist in Tabler 3.46.0. `CORE.md` §13.5 names it for the
+  generic PCI concept with no fallback, and also says an unmatched concept gets
+  no icon rather than an approximation, so generic PCI tabs carry none. Every
+  other candidate name verified and is in the subset: 30 glyphs, 14 kB.
+- `license-files` was removed from `pyproject.toml`. The PEP 639 list form is
+  rejected by the hatchling in Debian trixie, which is what the `.deb` is built
+  with. Hatchling finds both licence files on its own; the built wheel carries
+  them.
+- Package sizes for the README badges were measured by building the `.deb`
+  here (445 KiB) and compressing the same payload the Arch way (480 KiB).
+
+**Next.** Nothing in §3. The remaining work is §8: the user creates the empty
+GitHub repository, pushes `main` and the `v1.0` tag, and the workflow builds and
+publishes both packages.
