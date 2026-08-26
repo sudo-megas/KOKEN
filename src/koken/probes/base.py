@@ -65,6 +65,10 @@ class Row:
     tier: str = STATIC
     severity: str = NORMAL
     key: str = ""
+    # An expansion body the row carries itself, instead of one looked up by id
+    # in the explanation file. Only the About section uses this, to show the
+    # licence text without putting 35 kB of GPL into a user-editable TOML.
+    body: str = ""
 
     def __post_init__(self) -> None:
         if not self.key:
@@ -472,6 +476,7 @@ class Probe:
         tier: str = STATIC,
         severity: str = NORMAL,
         key: str = "",
+        body: str = "",
     ) -> Row:
         return Row(
             id=self.key(field_name),
@@ -480,6 +485,7 @@ class Probe:
             tier=tier,
             severity=severity,
             key=key,
+            body=body,
         )
 
     def empty_section(
