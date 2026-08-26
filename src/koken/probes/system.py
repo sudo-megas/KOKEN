@@ -39,6 +39,8 @@ from .base import (
     read_first_line,
     read_lines,
 )
+from . import filetypes
+from .packages import packages_section
 
 OS_RELEASE_PATHS = ("/etc/os-release", "/usr/lib/os-release")
 
@@ -105,7 +107,13 @@ class SystemProbe(Probe):
     label = "Operating system"
 
     def sections(self) -> list[Section]:
-        return [self._overview(), self._distribution(), self._init()]
+        return [
+            self._overview(),
+            self._distribution(),
+            self._init(),
+            packages_section(self),
+            filetypes.section(self),
+        ]
 
     # -- overview ---------------------------------------------------------
 

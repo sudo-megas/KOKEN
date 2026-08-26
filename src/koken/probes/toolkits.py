@@ -206,7 +206,9 @@ TIME_BUDGET = 0.35  # seconds for the whole survey
 MAX_ENTRIES = 2000  # .desktop files considered per directory
 MAX_HEAD = 4096  # bytes read from an ELF header and its program headers
 MAX_DYNAMIC = 1 << 16  # bytes of PT_DYNAMIC read
-MAX_STRTAB = 1 << 18  # bytes of DT_STRTAB read
+MAX_NAME = 512  # longest soname believed
+MAX_RUNPATH = 4096  # longest DT_RUNPATH believed
+MAX_NEEDED = 256  # DT_NEEDED entries believed
 MAX_SCRIPT = 65536  # bytes of an interpreted file read
 MAX_ENTRY_TEXT = 65536  # bytes of a .desktop file read
 MAX_PHNUM = 512  # program headers believed
@@ -348,6 +350,15 @@ def _stat(path: str):
         return os.stat(str(resolve(path)))
     except (OSError, ValueError):
         return None
+
+
+def _exists(path: str) -> bool:
+    """Whether anything at all is at *path*, symlink target or not."""
+    try:
+        os.lstat(str(resolve(path)))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def is_regular(path: str) -> bool:
@@ -525,8 +536,13 @@ def _parse_elf(handle) -> Elf | None:
     # finding the PT_LOAD segment that will be mapped over it and subtracting
     # that segment's own virtual address - which is exactly the arithmetic the
     # loader does, and the reason a section header table is not needed here.
-    table_bytes = b""
-    wanted = max(needed + paths) + 4096
+    #
+    # Each name is then read where it is. DT_NEEDED offsets are not contiguous and
+    # not ordered: a linker reuses whatever string is already in .dynstr, so
+    # the six names in one binary can be scattered across four hundred
+    # kilobytes of C++ symbol names. Reading a window and hoping it covers
+    # them finds most of them most of the time, which is the worst of the
+    # available behaviours - a wrong answer that looks like a right one.
     for item in segments:
         if item[0] != PT_LOAD:
             continue
@@ -537,38 +553,38 @@ def _parse_elf(handle) -> Elf | None:
         if not vaddr <= strtab < vaddr + filesize:
             continue
         inside = strtab - vaddr
-        handle.seek(offset + inside)
-        table_bytes = handle.read(min(wanted, filesize - inside, MAX_STRTAB))
-        break
-    if not table_bytes:
-        return Elf()
+        table_at, limit = offset + inside, filesize - inside
+        names = []
+        for value in needed[:MAX_NEEDED]:
+            text = _read_string(handle, table_at, value, limit, MAX_NAME)
+            if text:
+                names.append(text)
+        return Elf(
+            needed=tuple(names),
+            runpath=tuple(
+                part
+                for value in paths[:MAX_NEEDED]
+                for part in _split_runpath(
+                    _read_string(handle, table_at, value, limit, MAX_RUNPATH)
+                )
+            ),
+        )
+    return Elf()
 
-    return Elf(
-        needed=tuple(_strings(table_bytes, needed)),
-        runpath=tuple(
-            part
-            for value in paths
-            for part in _split_runpath(_string_at(table_bytes, value))
-        ),
-    )
 
+def _read_string(handle, base: int, offset: int, limit: int, size: int) -> str:
+    """One NUL-terminated string out of the string table, or nothing.
 
-def _string_at(table: bytes, offset: int) -> str:
-    if not 0 <= offset < len(table):
+    *limit* is how much of the table the segment holding it actually covers,
+    so an offset pointing past the end of it reads nothing rather than
+    reaching into whatever follows the segment in the file.
+    """
+    if not 0 <= offset < limit:
         return ""
-    end = table.find(b"\0", offset)
-    if end < 0:
-        end = len(table)
-    return table[offset:end].decode("utf-8", errors="replace")
-
-
-def _strings(table: bytes, offsets) -> list[str]:
-    out = []
-    for offset in offsets:
-        text = _string_at(table, offset)
-        if text:
-            out.append(text)
-    return out
+    handle.seek(base + offset)
+    chunk = handle.read(min(size, limit - offset))
+    end = chunk.find(b"\0")
+    return chunk[: end if end >= 0 else len(chunk)].decode("utf-8", errors="replace")
 
 
 def _split_runpath(text: str) -> list[str]:
@@ -1057,9 +1073,8 @@ def network_prefixes() -> list[str]:
 class Scanner:
     """One pass over the installed applications, under a wall-clock budget."""
 
-    def __init__(self, budget: float = TIME_BUDGET) -> None:
-        self.budget = budget
-        self.started = time.monotonic()
+    def __init__(self, budget: float | None = None) -> None:
+        self.budget = TIME_BUDGET if budget is None else budget
         self.libraries = library_directories()
         self.network = network_prefixes()
         self.packages = Packages()
@@ -1067,11 +1082,13 @@ class Scanner:
         self._elf: dict[str, Elf | None] = {}
         self._soname: dict[str, str] = {}
         self._names: dict[str, set[str]] = {}
+        self._odd: set[str] = set()
         self._search = [
             part
             for part in (os.environ.get("PATH") or DEFAULT_PATH).split(":")
             if part.startswith("/")
         ]
+        self.started = time.monotonic()
 
     # -- bounds -----------------------------------------------------------
 
@@ -1114,11 +1131,22 @@ class Scanner:
         if "/" in command:
             return ""
         for directory in self._search:
+            # The directory is listed once and the name looked up in that
+            # listing, rather than stat'ing a candidate per application per
+            # PATH entry: a machine with four hundred applications and six
+            # directories on PATH would otherwise pay two thousand system
+            # calls to answer a question three readdirs already answer.
+            if command not in self.directory_names(directory):
+                continue
             candidate = f"{directory.rstrip('/')}/{command}"
             if self.on_network(candidate):
                 continue
             if is_regular(candidate):
                 return candidate
+            if _exists(candidate):
+                # A directory, a device, a named pipe, or a link pointing at
+                # nothing. Present, and not something to read.
+                self._odd.add(command)
         return ""
 
     def resolve_soname(self, soname: str, origin: str, runpath) -> str:
@@ -1175,12 +1203,17 @@ class Scanner:
         if found:
             chosen = best(key for key, _ in found)
             soname = next(name for key, name in found if key == chosen)
-            return chosen, f"links {soname}", sorted({key for key, _ in found} - {chosen})
+            return (
+                chosen,
+                f"{os.path.basename(binary)} links {soname}",
+                sorted({key for key, _ in found} - {chosen}),
+            )
 
         # Nothing directly. A large application keeps its interface in its own
         # library and links that, so the libraries it does name are opened -
         # once each, cached by soname, and only for a binary that got this far.
         origin = os.path.dirname(binary)
+        deeper: list[tuple[str, str]] = []
         for soname in elf.needed[:MAX_TRANSITIVE]:
             if self.out_of_time():
                 break
@@ -1191,13 +1224,25 @@ class Scanner:
                 path = self.resolve_soname(soname, origin, elf.runpath)
                 inner = self.elf(path) if path else None
                 if inner is not None:
-                    key = best(
-                        toolkit_for_soname(name) for name in inner.needed
-                    )
+                    key = best(toolkit_for_soname(name) for name in inner.needed)
                 self._soname[soname] = key
             if key:
-                return key, f"links {soname}, which links {TOOLKIT_BY_KEY[key].label}", []
-        return "", "", []
+                deeper.append((key, soname))
+        if not deeper:
+            return "", "", []
+
+        # All of them, then the ranking - not the first one found. A library
+        # list is in link order, which has nothing to say about which toolkit
+        # draws the window, and an application whose private library pulls in
+        # both Electron and GTK 3 is an Electron application either way.
+        chosen = best(key for key, _ in deeper)
+        soname = next(name for key, name in deeper if key == chosen)
+        return (
+            chosen,
+            f"{os.path.basename(binary)} links {soname}, which links "
+            f"{TOOLKIT_BY_KEY[chosen].label}",
+            sorted({key for key, _ in deeper} - {chosen}),
+        )
 
     def from_script(self, path: str) -> tuple[str, str, list[str]]:
         """What an interpreted file imports, and where its wrapper points."""
@@ -1271,7 +1316,12 @@ class Scanner:
             spare = exec_tokens(app.try_exec)
             binary = self.which(spare[0]) if spare else ""
         if not binary:
-            app.evidence = f"{app.command or 'the Exec line'} was not found in PATH"
+            named = app.command or "the Exec line"
+            app.evidence = (
+                f"{named} is not an ordinary file"
+                if app.command in self._odd
+                else f"{named} was not found in PATH"
+            )
             self.count("unresolved")
             return
 
@@ -1412,10 +1462,10 @@ def _runtime_toolkit(runtime: str) -> str:
     return ""
 
 
-def survey(budget: float = TIME_BUDGET) -> Survey:
+def survey(budget: float | None = None) -> Survey:
     """Every visible application on the machine, and what each is built with."""
-    scanner = Scanner(budget)
     result = Survey(installed=installed_versions())
+    scanner = Scanner(budget)
 
     seen: set[str] = set()
     pending: list[Application] = []
@@ -1428,6 +1478,9 @@ def survey(budget: float = TIME_BUDGET) -> Survey:
             continue
         taken = 0
         for item in entries[:MAX_ENTRIES]:
+            if scanner.out_of_time():
+                result.skipped += 1
+                continue
             path = f"{directory.rstrip('/')}/{item.name}"
             fields = parse_entry(path)
             if not fields or fields.get("Type", "Application") != "Application":
@@ -1458,8 +1511,12 @@ def survey(budget: float = TIME_BUDGET) -> Survey:
             continue
         try:
             scanner.classify(app)
-        except (OSError, ValueError, RecursionError):
-            app.evidence = "could not be read"
+        except Exception as exc:  # deliberately broad: see below
+            # One desktop entry is one line of one section. Whatever it holds -
+            # and it holds whatever the person who installed it wrote - it must
+            # not be able to take the other three hundred with it, nor the two
+            # sections beside this one.
+            app.evidence = f"could not be read ({type(exc).__name__})"
     result.applications = pending
     result.sources = scanner.sources
     result.network_skipped += scanner.sources.get("network", 0)

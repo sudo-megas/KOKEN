@@ -434,6 +434,18 @@ desktop workloads leaving it on is almost always correct.
 - `long` is the expansion body. Plain prose, no Markdown, wrapped by the widget.
 - A row with no entry renders normally and shows no expander. This is the mechanism
   that lets v1.0 ship with partial coverage.
+- A probe may supply the expansion itself, on the row, instead of having it looked
+  up here. When it does, that wins. This is for text no static corpus can hold:
+  a list that depends on the machine, or a sentence explaining why a particular
+  number is unavailable *on this machine* rather than in general. It is not a
+  licence to move explanations into source. If a row's text would read the same on
+  every machine in the world, it belongs in this file.
+
+  There is a second reason it exists. Section 10.1's trade means an existing
+  user's copy of this file is never refreshed, so an explanation added here for a
+  section added later reaches only people installing for the first time. A probe
+  that carries its own text reaches everybody. Weigh that when adding a section
+  after 1.0.
 
 ### 10.3 Coverage target for v1.0
 

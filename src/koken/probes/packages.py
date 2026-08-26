@@ -49,6 +49,7 @@ import time
 from dataclasses import dataclass, field
 
 from .base import (
+    NOT_REPORTED,
     Probe,
     Section,
     fmt_bytes,
@@ -66,13 +67,17 @@ PACMAN_SYNC = "/var/lib/pacman/sync"
 DPKG_STATUS = "/var/lib/dpkg/status"
 DPKG_INFO = "/var/lib/dpkg/info"
 APT_EXTENDED_STATES = "/var/lib/apt/extended_states"
+APT_LISTS = "/var/lib/apt/lists"
 
 # What the whole section may spend inside the launch enumeration, and what the
-# installed-package scan may spend of it. Whatever is left over is what the
-# repository databases get, and they are the part that is dropped first: the
-# installation is the subject, the repositories are context for one row.
+# installed-package scan may spend of it. The installation is the subject here;
+# everything else is bounded by what is left when that scan is done.
 BUDGET = 2.0
 LOCAL_BUDGET = 1.2
+# The repository databases are the expensive part and the least of it: one
+# row's worth of answer for tens of megabytes of decompression. This caps what
+# they may take even when the rest of the scan finished early.
+SYNC_BUDGET = 0.8
 # The clock is consulted once per this many records rather than once per
 # record. time.monotonic() is cheap, but not as cheap as not calling it.
 CLOCK_INTERVAL = 64
@@ -149,7 +154,6 @@ class _Package:
     depends: tuple[str, ...] = ()
     optional: tuple[str, ...] = ()
     provides: tuple[str, ...] = ()
-    validation: str = ""
 
     @property
     def uid(self) -> str:
@@ -273,7 +277,6 @@ def pacman_package(text: str) -> _Package | None:
         depends=_names(fields.get("DEPENDS", [])),
         optional=_names(fields.get("OPTDEPENDS", [])),
         provides=_names(fields.get("PROVIDES", [])),
-        validation=(_first(fields, "VALIDATION") or "").lower(),
     )
 
 
@@ -619,9 +622,9 @@ def read_repositories(clock: _Clock) -> _Repositories:
         if plain is None:
             result.failed.append(f"{label} ({reason})")
             continue
-        names = tar_package_names(plain, clock)
+        names, reason = tar_package_names(plain, clock)
         if names is None:
-            result.failed.append(f"{label} (not in the layout this reads)")
+            result.failed.append(f"{label} ({reason})")
             continue
         result.names |= names
         result.read.append((label, len(names)))
@@ -636,14 +639,27 @@ def decompress(raw: bytes) -> tuple[bytes | None, str]:
     support. zstd does too, and Python 3.11 cannot read it without another
     library, so that case is named rather than guessed at.
     """
+    oversize = (
+        None,
+        f"larger uncompressed than the {MAX_DB_BYTES // (1024 * 1024)} MB this will "
+        "unpack during launch",
+    )
     try:
         if raw[:2] == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
-                return stream.read(MAX_DB_BYTES), ""
+                # One byte past the cap: a database that does not fit is not
+                # read short, because a short read of a repository is a foreign
+                # package count that is wrong by however much was missed.
+                plain = stream.read(MAX_DB_BYTES + 1)
+            return oversize if len(plain) > MAX_DB_BYTES else (plain, "")
         if raw[:6] == b"\xfd7zXZ\x00":
-            return lzma.LZMADecompressor().decompress(raw, max_length=MAX_DB_BYTES), ""
+            engine = lzma.LZMADecompressor()
+            plain = engine.decompress(raw, max_length=MAX_DB_BYTES)
+            return (plain, "") if engine.eof else oversize
         if raw[:3] == b"BZh":
-            return bz2.BZ2Decompressor().decompress(raw, max_length=MAX_DB_BYTES), ""
+            engine = bz2.BZ2Decompressor()
+            plain = engine.decompress(raw, max_length=MAX_DB_BYTES)
+            return (plain, "") if engine.eof else oversize
         if raw[:4] == b"\x28\xb5\x2f\xfd":
             return None, "zstd compressed, which needs a library KOKEN does not carry"
         if raw[257:262] == b"ustar":
@@ -653,7 +669,7 @@ def decompress(raw: bytes) -> tuple[bytes | None, str]:
     return None, "not a format this reads"
 
 
-def tar_package_names(raw: bytes, clock: _Clock) -> set[str] | None:
+def tar_package_names(raw: bytes, clock: _Clock) -> tuple[set[str] | None, str]:
     """Package names from a tar archive's member headers.
 
     Walking headers rather than handing the archive to ``tarfile`` is worth
@@ -664,7 +680,7 @@ def tar_package_names(raw: bytes, clock: _Clock) -> set[str] | None:
     so the first component, with two fields taken off the end, is the name.
     """
     if raw[257:262] != b"ustar":
-        return None
+        return None, "not in the layout this reads"
     names: set[str] = set()
     offset = 0
     total = len(raw)
@@ -672,13 +688,15 @@ def tar_package_names(raw: bytes, clock: _Clock) -> set[str] | None:
     while offset + 512 <= total:
         header = raw[offset : offset + 512]
         if header[0:1] == b"\x00":
-            break  # the run of zero blocks that ends an archive
+            return names, ""  # the run of zero blocks that ends an archive
         try:
             size = int(header[124:136].split(b"\x00", 1)[0].strip() or b"0", 8)
         except ValueError:
-            break  # a header this does not understand ends the walk honestly
+            # A header this cannot read leaves the rest of the archive unknown,
+            # and half a repository is not an answer this row can use.
+            return None, "ended in a header this does not understand"
         if size < 0:
-            break
+            return None, "ended in a header this does not understand"
         path = header[:100].split(b"\x00", 1)[0].decode("utf-8", "replace")
         head = path.split("/", 1)[0]
         if head:
@@ -686,8 +704,11 @@ def tar_package_names(raw: bytes, clock: _Clock) -> set[str] | None:
         offset += 512 + ((size + 511) // 512) * 512
         seen += 1
         if seen % 4096 == 0 and clock.expired():
-            break
-    return names
+            return None, "not read to the end: the scan ran out of time"
+    # Every tar ends in a run of zero blocks, which is the only thing that says
+    # the archive is all here. Running off the end of the buffer instead means
+    # the file was truncated, and a truncated repository is missing names.
+    return None, "ended before the archive did"
 
 
 # --------------------------------------------------------------------------
@@ -707,12 +728,14 @@ def packages_section(probe: Probe, budget: float = BUDGET) -> Section:
     try:
         _fill(probe, section, _Clock(budget))
     except Exception as exc:  # deliberately broad: this runs inside launch
-        section.rows.clear()
+        # Whatever was built before the failure is true and stays. The row
+        # below says the rest is missing, which is the difference between a
+        # short section and a section that quietly lost half of itself.
         section.add(
             probe.row(
                 "pkg_error",
                 "Status",
-                f"The package database could not be read on this machine "
+                f"The rest of this section could not be read on this machine "
                 f"({type(exc).__name__}).",
             )
         )
@@ -745,6 +768,29 @@ def _fill(probe: Probe, section: Section, clock: _Clock) -> None:
 
     result = shape(inventory)
     _source_rows(probe, section, inventory, clock)
+    if not result.total and inventory.complete:
+        # The database is here, was read to the end, and names nothing. Eight
+        # rows of zero would be true and useless; one sentence is the same
+        # information. A scan that ran out of time also has nothing to count,
+        # and must not say the database is empty, so it falls through to the
+        # counts and the note above that explains them.
+        section.add(
+            probe.row(
+                "pkg_empty",
+                "Status",
+                f"The {inventory.manager} database is present and records no "
+                "installed packages.",
+                body=(
+                    "The database exists, and holds nothing this scan could count. "
+                    "That is what a chroot or a container built without its package "
+                    "manager's records looks like: the software is on the disk, and "
+                    "the record of how it got there is not.\n\n"
+                    "It is also what an interrupted install looks like, in which case "
+                    "the row above says how many records were unreadable."
+                ),
+            )
+        )
+        return
     _count_rows(probe, section, inventory, result)
     _orphan_row(probe, section, inventory, result)
     _size_rows(probe, section, result)
@@ -790,9 +836,11 @@ def _source_rows(probe: Probe, section: Section, inventory: _Inventory, clock: _
     )
     if path_exists(other):
         body += (
-            f"\n\n{other} is present on this machine as well. The larger database is "
-            "the one reported here; a machine carrying both usually has the second "
-            "one installed as a tool rather than as the thing that manages it."
+            f"\n\n{other} is present on this machine as well. Whichever of the two "
+            "holds packages is the one reported here, pacman's first if both do; a "
+            "machine carrying both usually has the second installed as a tool for "
+            "unpacking other people's packages rather than as the thing that manages "
+            "this one."
         )
     section.add(
         probe.row(
@@ -807,8 +855,8 @@ def _source_rows(probe: Probe, section: Section, inventory: _Inventory, clock: _
     notes = []
     if inventory.skipped:
         notes.append(
-            f"The scan stopped after {round(clock.elapsed(), 1)} seconds, its budget for "
-            "this section, with "
+            f"The scan stopped after {round(clock.elapsed(), 1)} seconds, the time this "
+            "section allows itself for reading the installed packages, with "
             + (
                 f"{fmt_int(inventory.skipped)} records still unread"
                 if inventory.manager == "pacman"
@@ -854,16 +902,22 @@ def _count_rows(
             if inventory.complete
             else "packages read before the scan ran out of time",
             body=(
-                "Every package the database records as fully installed. On the dpkg "
-                "side that means the ones whose status ends in 'installed'; a package "
-                "that was removed but left its configuration files behind is not "
-                "counted, which is the difference between this number and the longer "
-                "one 'dpkg -l' prints.\n\n"
-                "A package count does not compare between distributions. Debian splits "
-                "a library, its headers and its documentation into three packages where "
-                "Arch usually ships one, so 2,900 packages on one machine and 1,400 on "
-                "the other can be the same software. The number is worth comparing "
-                "against this machine last year, not against somebody else's machine."
+                "Every package the database records as installed.\n\n"
+                + (
+                    "One directory under the local database is one package, so this is "
+                    "the number of lines 'pacman -Q' prints."
+                    if inventory.manager == "pacman"
+                    else "A package counts when its status ends in 'installed'. One "
+                    "that was removed but left its configuration files behind does "
+                    "not, which is the difference between this number and the longer "
+                    "one 'dpkg -l' prints."
+                )
+                + "\n\nA package count does not compare between distributions. Debian "
+                "splits a library, its headers and its documentation into three "
+                "packages where Arch usually ships one, so 2,900 packages on one "
+                "machine and 1,400 on the other can be the same software. The number is "
+                "worth comparing against this machine last year, not against somebody "
+                "else's machine."
             ),
         )
     )
@@ -887,7 +941,20 @@ def _count_rows(
                 "again or when it is set by hand — 'pacman -D --asdeps' and "
                 "'--asexplicit' on Arch, 'apt-mark auto' and 'apt-mark manual' on "
                 "Debian. A package first pulled in as a dependency years ago and used "
-                "directly ever since still counts as a dependency here."
+                "directly ever since still counts as a dependency here.\n\n"
+                + (
+                    "What a fresh install puts down is explicit too — the base group, "
+                    "the kernel, the bootloader, whatever the installer was told to "
+                    "add — so a new machine starts with a hundred or so of these "
+                    "before anybody chooses anything."
+                    if inventory.manager == "pacman"
+                    else "apt sets the automatic mark only on packages apt itself "
+                    "pulled in. Anything the installer laid down, or debootstrap, or "
+                    "whoever built the image this machine started from, carries no "
+                    "mark and is counted here as chosen. That is why this number can "
+                    "be most of the installation on a machine nobody has installed "
+                    "anything on yet."
+                )
             ),
         )
     )
@@ -917,61 +984,84 @@ def _portion(part: int, total: int) -> str:
     return f"{round(100.0 * part / total)}% of the installation"
 
 
+# What an orphan is, and what it is not. This is the row people act on, so the
+# body says how the number was worked out before it says anything else.
+_ORPHAN_RULE = (
+    "An orphan is a package that arrived as somebody else's dependency and that "
+    "nothing installed depends on any more. Whatever pulled it in is gone; the "
+    "package stayed. This is leftovers, not damage: an orphan costs disk and nothing "
+    "else, and a machine that has been upgraded for years accumulates them quietly.\n\n"
+    "How this count is worked out. Every installed package's dependency list is read, "
+    "and any package installed as a dependency that no other installed package names "
+    "is counted here. Names a package provides count as its own, so something pulled "
+    "in to satisfy a virtual name is not called an orphan because no list mentions its "
+    "real name. Version constraints are stripped before matching, so a package needed "
+    "as 'foo>=1.2' is a package that is needed. Every ambiguity is settled towards not "
+    "calling something an orphan.\n\n"
+    "Why removing one is usually safe. Nothing declares a need for it, so nothing the "
+    "package manager knows about can break, and the package manager checks again at "
+    "the moment of removal: it refuses to remove anything something else still "
+    "needs.\n\n"
+    "Why it is not always safe. The flag records intent, not use — something installed "
+    "as a dependency years ago may be a program that is used directly every day, and "
+    "nothing writes that down. Nothing declares a runtime plugin either: a library "
+    "opened by dlopen, a codec, a theme engine, an interpreter module imported by "
+    "name, is a real dependency that appears in no dependency list at all. And "
+    "anything built by hand outside the package manager, linked against a library on "
+    "this list, is invisible to all of this.\n\n"
+    "The list is one layer. Remove these and whatever only they depended on is "
+    "orphaned in turn, which is why the question gets asked again until the answer is "
+    "nothing."
+)
+
+_ORPHAN_PACMAN = (
+    "\n\nPackages that something still lists as an optional dependency are left out "
+    "of the count, which is the rule 'pacman -Qtdq' uses: this row is that number."
+)
+
+_ORPHAN_DPKG = (
+    "\n\nPackages that something still recommends are left out of the count. apt's "
+    "own 'autoremove' asks a slightly different question — it offers to remove every "
+    "automatically installed package that no manually installed one still leads to, "
+    "following chains rather than single steps — so it will usually name more than "
+    "this row counts. The extra ones are the layers behind these."
+)
+
+
 def _orphan_row(
     probe: Probe, section: Section, inventory: _Inventory, result: _Shape
 ) -> None:
+    """The orphan count, or nothing at all when the scan was cut short.
+
+    A number withheld is better than a number that would send somebody to
+    remove packages that are still needed, and a dependency graph read only in
+    part produces exactly that.
+    """
     if not inventory.complete:
         return
-    rule = (
-        "An orphan is a package that arrived as somebody else's dependency and that "
-        "nothing installed depends on any more. Whatever pulled it in is gone; the "
-        "package stayed. This is leftovers, not damage: an orphan costs disk and "
-        "nothing else, and a machine that has been upgraded for years accumulates "
-        "them quietly.\n\n"
-        "How this count is worked out. Every installed package's dependency list is "
-        "read, and any package installed as a dependency that no other installed "
-        "package names is counted here. Names a package provides count as its own: "
-        "something pulled in to satisfy a virtual name is not an orphan because no "
-        "list mentions its real name. Version constraints are stripped before "
-        "matching, so a package needed as 'foo>=1.2' is a package that is needed. "
-        "Packages that something still lists as an optional dependency are left out, "
-        "which is the same rule 'pacman -Qtdq' uses.\n\n"
-        "Why removing one is usually safe. Nothing declares a need for it, so nothing "
-        "the package manager knows about can break. Both package managers will do it "
-        "in one command, and both will refuse if the reasoning was wrong.\n\n"
-        "Why it is not always safe. The flag records intent, not use: something "
-        "installed as a dependency years ago may be a program that is used directly "
-        "every day, and nothing records that. Nothing declares a runtime plugin "
-        "either — a library opened by dlopen, a codec, a theme engine, an interpreter "
-        "module imported by name — so a real dependency can appear in no dependency "
-        "list at all. And anything built by hand outside the package manager, linked "
-        "against a library that is on this list, is invisible to all of this.\n\n"
-        "The list is one layer. Remove these and whatever only they depended on "
-        "becomes orphaned in turn, which is why the command gets run again until it "
-        "prints nothing."
+    rule = _ORPHAN_RULE + (
+        _ORPHAN_PACMAN if inventory.manager == "pacman" else _ORPHAN_DPKG
     )
     if result.optional_only:
-        rule += (
-            f"\n\nA further {fmt_int(len(result.optional_only))} package"
-            + ("s are" if len(result.optional_only) != 1 else " is")
-            + " unneeded except that something still lists "
-            + ("them" if len(result.optional_only) != 1 else "it")
-            + " as an optional dependency. They are not counted above."
+        spare = len(result.optional_only)
+        rule += "\n\n" + (
+            "One further package is unneeded except that something still lists it as "
+            "an optional dependency, and it is not counted above."
+            if spare == 1
+            else f"A further {fmt_int(spare)} packages are unneeded except that "
+            "something still lists them as an optional dependency, and they are not "
+            "counted above."
         )
     count = len(result.orphans)
-    if count:
-        body = rule + "\n\n" + "\n".join(_listing(result.orphans))
-        gloss = "nothing installed depends on them"
-    else:
-        body = rule
-        gloss = "every dependency here is still needed by something"
     section.add(
         probe.row(
             "pkg_orphans",
             "Orphans",
             fmt_int(count) + (" — expand for the list" if count else ""),
-            gloss=gloss,
-            body=body,
+            gloss="nothing installed depends on them"
+            if count
+            else "every dependency here is still needed by something",
+            body=rule + ("\n\n" + "\n".join(_listing(result.orphans)) if count else ""),
         )
     )
 
@@ -981,7 +1071,7 @@ def _size_rows(probe: Probe, section: Section, result: _Shape) -> None:
         probe.row(
             "pkg_size",
             "Installed size",
-            fmt_bytes(result.size) if result.sized else "Not recorded",
+            fmt_bytes(result.size) if result.sized else NOT_REPORTED,
             gloss=f"across {fmt_int(result.sized)} packages that record one"
             if result.sized != result.total
             else "",
@@ -1005,7 +1095,9 @@ def _size_rows(probe: Probe, section: Section, result: _Shape) -> None:
             "Largest packages",
             f"{fmt_bytes(total)} in the {_count_word(len(result.largest))} largest "
             "— expand for the list",
-            gloss=_portion(total, result.size),
+            gloss=f"{round(100.0 * total / result.size)}% of the installed size"
+            if result.size
+            else "",
             body=(
                 "The biggest packages installed, by the size they record.\n\n"
                 "Large is not the same as wasteful. The names expected near the top are "
@@ -1035,6 +1127,43 @@ def _count_word(value: int) -> str:
     return words.get(value, fmt_int(value))
 
 
+# How apt's downloaded indexes look on this machine, named rather than assumed.
+# A distribution that stores them compressed puts them out of reach of the
+# standard library as well as out of reach of the launch budget, and which of
+# the two is true here is a fact about this machine, not a general claim.
+_INDEX_FORMATS = {
+    "": "uncompressed",
+    ".lz4": "lz4-compressed and so out of reach of the standard library",
+    ".zst": "zstd-compressed and so out of reach of the standard library",
+    ".gz": "gzip-compressed",
+    ".xz": "xz-compressed",
+    ".bz2": "bzip2-compressed",
+}
+
+
+def _apt_index_note() -> str:
+    """One sentence about the repository indexes this machine actually holds."""
+    indexes = [entry.name for entry in list_dir(APT_LISTS) if "_Packages" in entry.name]
+    if not indexes:
+        return (
+            f" This machine holds none of them under {APT_LISTS} at the moment, so "
+            "there would be nothing to compare against in any case."
+        )
+    formats = sorted(
+        {
+            _INDEX_FORMATS.get(
+                name.split("_Packages", 1)[1], "in a form this does not recognise"
+            )
+            for name in indexes
+        }
+    )
+    return (
+        f" This machine holds {fmt_int(len(indexes))} of them under {APT_LISTS}, "
+        + fmt_list(formats, empty="in an unknown form")
+        + "."
+    )
+
+
 def _foreign_rows(
     probe: Probe, section: Section, inventory: _Inventory, clock: _Clock
 ) -> None:
@@ -1060,19 +1189,19 @@ def _foreign_rows(
                 body=(
                     meaning + "\n\n"
                     "This machine's database is dpkg's, and dpkg does not record where "
-                    "a package came from — only apt knows, from the repository indexes "
-                    "it downloads. Those indexes are tens of megabytes, and on many "
-                    "systems they are compressed in a format Python cannot read without "
-                    "another library. Reading them is not something KÖKEN will do "
-                    "inside the moment the window takes to appear, so this row states "
-                    "that the number is not known rather than offering a guess as if it "
-                    "were."
+                    "a package came from. Only apt knows, from the repository indexes "
+                    "it downloads, and those are the wrong size for this: tens of "
+                    "megabytes to read, parse and discard for one row, inside the "
+                    "moment the window takes to appear."
+                    + _apt_index_note()
+                    + " So this row says the number is not known, rather than offering "
+                    "a guess with the shape of an answer."
                 ),
             )
         )
         return
 
-    repositories = read_repositories(clock.share(clock.remaining()))
+    repositories = read_repositories(clock.share(SYNC_BUDGET))
     if not repositories.present:
         section.add(
             probe.row(

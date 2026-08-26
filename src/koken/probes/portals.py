@@ -475,6 +475,7 @@ DECISIONS = {
     NAMED: "named for this interface",
     INHERITED: "inherited from the default line",
     UNSET: "not configured",
+    ANY: "any backend, taken in name order",
 }
 
 
@@ -491,6 +492,12 @@ class Assignment:
     trace: list[str] = field(default_factory=list)
     # Set when the configuration itself is wrong, not merely absent.
     problem: str = ""
+    # Entries in this interface's own list that name an installed backend which
+    # cannot answer this interface. Collected only from the interface's own key:
+    # a default line is *meant* to be filtered per interface - that is what the
+    # specification says it is for - so a skip there is not a mistake, while a
+    # skip in a line written about this one interface is.
+    mistaken: list[str] = field(default_factory=list)
     # True when the configuration deliberately asks for no implementation.
     suppressed: bool = False
     # What the portal would fall back to with no configuration for this
@@ -503,7 +510,7 @@ class Assignment:
         return short_interface(self.interface)
 
 
-def _first_usable(names, interface, backends, trace) -> Backend | None:
+def _first_usable(names, interface, backends, trace, mistaken=None) -> Backend | None:
     """Walk a preference list the way the portal does, recording each step."""
     by_name = {backend.name: backend for backend in backends}
     for entry in names:
@@ -529,6 +536,8 @@ def _first_usable(names, interface, backends, trace) -> Backend | None:
             continue
         if not backend.implements(interface):
             trace.append(f"{entry} — installed, but does not implement this interface, skipped")
+            if mistaken is not None:
+                mistaken.append(entry)
             continue
         trace.append(f"{entry} — installed and implements this interface: chosen")
         return backend
@@ -574,11 +583,20 @@ def assign(interface: str, config, backends, desktops) -> Assignment:
         return out
 
     if named is not None:
-        backend = _first_usable(named, interface, backends, out.trace)
+        backend = _first_usable(named, interface, backends, out.trace, out.mistaken)
         if backend is not None:
             out.backend = backend
             out.decision = NAMED
-            out.gloss = DECISIONS[NAMED]
+            # A backend that is not literally in the list can only have come
+            # from the * entry, which is a different answer to "how was this
+            # decided" and reads as one.
+            out.gloss = DECISIONS[NAMED] if backend.name in named else DECISIONS[ANY]
+            if out.mistaken:
+                out.problem = (
+                    f"the line for this interface names {out.mistaken[0]}, which does "
+                    f"not implement it, so {backend.name} answers instead"
+                )
+                out.gloss = f"named here, after {out.mistaken[0]} was passed over"
             return out
         if not default:
             out.decision = NAMED
@@ -596,7 +614,18 @@ def assign(interface: str, config, backends, desktops) -> Assignment:
         if backend is not None:
             out.backend = backend
             out.decision = INHERITED
-            out.gloss = DECISIONS[INHERITED]
+            out.gloss = (
+                DECISIONS[INHERITED] if backend.name in default else DECISIONS[ANY]
+            )
+            if out.mistaken:
+                # The interface has a line of its own, and that line did nothing.
+                out.problem = (
+                    f"the line for this interface names {out.mistaken[0]}, which does "
+                    "not implement it, so the default line answered instead"
+                )
+                out.gloss = f"the default line took over; {out.mistaken[0]} cannot answer it"
+            elif named is not None:
+                out.gloss = "the default line took over; nothing named here is installed"
             return out
         if named is not None:
             out.decision = NAMED
@@ -821,17 +850,29 @@ def _shadow_rows(probe, resolution) -> list[Row]:
         value = own[0].path
         severity = WARNING
         gloss = "your own file, and it is not the one in effect"
+        same_directory = chosen_path.rsplit("/", 1)[0] == value.rsplit("/", 1)[0]
+        if same_directory:
+            why = (
+                "Portal configuration is resolved per directory, and inside each "
+                "directory a desktop-specific file wins outright: with "
+                "XDG_CURRENT_DESKTOP naming a desktop, a file named after it beats "
+                f"{CONFIG_NAME} sitting beside it, and nothing in the losing file is "
+                "merged in."
+            )
+        else:
+            why = (
+                "The file that won sits in a directory searched before this one, and "
+                "the search stops at the first file it finds: nothing in this file is "
+                "merged into it."
+            )
         lead = (
-            "This file is yours and it is being ignored. Portal configuration is "
-            "resolved per directory, and inside each directory a desktop-specific "
-            "file wins outright: with XDG_CURRENT_DESKTOP naming a desktop, a "
-            f"file named after it beats {CONFIG_NAME} sitting beside it, and "
-            "nothing in the losing file is merged in. This is the commonest "
-            "portal mistake, and it is silent - the portal logs which file it "
-            "read only in its debug output, and the file you edited stays where "
-            "you left it looking authoritative. Either move your preferences into "
-            f"the file in effect, {chosen_path}, or rename yours to match the "
-            "desktop-specific name so it wins."
+            "This file is yours and it is being ignored. "
+            + why
+            + " This is the commonest portal mistake, and it is silent - the portal "
+            "logs which file it read only in its debug output, and the file you "
+            "edited stays where you left it looking authoritative. Either move your "
+            f"preferences into the file in effect, {chosen_path}, or rename yours to "
+            "match the name that beat it."
         )
     elif own_ignored:
         value = own_ignored[0].path
@@ -871,7 +912,7 @@ def _shadow_rows(probe, resolution) -> list[Row]:
 def _settings_row(probe, config, backends, desktops) -> Row:
     """The interface that decides whether every application looks light or dark."""
     assignment = assign(SETTINGS_INTERFACE, config, backends, desktops)
-    value, severity, gloss, extra = _assignment_value(assignment, desktops)
+    shown = _present(assignment, desktops, critical=True)
     lead = (
         "org.freedesktop.impl.portal.Settings is the interface that carries "
         "org.freedesktop.appearance color-scheme, the one system-wide setting that "
@@ -882,63 +923,105 @@ def _settings_row(probe, config, backends, desktops) -> Row:
         "own default, usually dark, and there is no way to argue with it from the "
         "application side. If everything on the machine is stuck in one scheme "
         "while the shell's own setting says otherwise, this row names the program "
-        "responsible."
+        "responsible.\n\n"
+        "This is who is configured to answer, which is not the same as what was "
+        "answered. What the running portal actually returned for the colour scheme "
+        "is the Colour scheme row in Overview. If those two disagree, the portal was "
+        "started before this configuration was last changed, and restarting the "
+        "session is what applies it."
     )
-    if extra:
-        lead += "\n\n" + extra
+    if shown.extra:
+        lead += "\n\n" + shown.extra
     return probe.row(
         "portal_settings",
         "Appearance backend",
-        value,
-        severity=severity,
-        gloss=gloss,
+        shown.value,
+        severity=shown.severity,
+        gloss=shown.gloss,
         body=_body(lead, assignment.trace),
     )
 
 
-def _assignment_value(assignment, desktops) -> tuple[str, str, str, str]:
-    """The value line, severity, gloss and any extra prose for one interface."""
+@dataclass
+class Presentation:
+    """One assignment as a row reads it."""
+
+    value: str
+    severity: str = NORMAL
+    gloss: str = ""
+    # Extra prose for the expansion, above the per-entry trace.
+    extra: str = ""
+    # One line for the summary row, set only when something is actually wrong.
+    problem: str = ""
+
+
+def _present(assignment, desktops, critical: bool = False) -> Presentation:
+    """The value line, severity and gloss for one interface.
+
+    A row is warning-coloured when the configuration does not do what it looks
+    like it does: a backend named for an interface it cannot answer, an
+    interface whose preference list nothing implements, or - and this is the
+    one the appearance interface gets checked for - a backend that belongs to a
+    desktop which is not the one running.
+
+    That last check is not applied to every interface on purpose. ``UseIn`` is
+    deprecated, it names a family rather than a session (``wlroots`` covers a
+    dozen compositors), and a screen-capture backend outside its nominal
+    desktop is ordinary and works. A *settings* backend outside its own desktop
+    is not ordinary: it is asked to publish a preference that lives in that
+    desktop's own configuration, which it cannot read, so it answers with a
+    built-in default and every application on the machine follows it.
+    """
     if assignment.suppressed:
-        return ("No implementation", NORMAL, assignment.gloss, "")
+        return Presentation("No implementation", NORMAL, assignment.gloss)
 
     if assignment.backend is not None:
         backend = assignment.backend
-        severity = NORMAL
-        gloss = assignment.gloss
-        extra = ""
+        out = Presentation(backend.name, NORMAL, assignment.gloss)
+        if assignment.problem:
+            out.severity = WARNING
+            out.problem = f"{assignment.short} — {assignment.problem}"
+            out.extra = assignment.problem[0].upper() + assignment.problem[1:] + "."
         if not backend.suits(desktops):
-            severity = WARNING
-            gloss = f"{assignment.gloss}, but built for another desktop"
-            extra = (
+            session = ", ".join(desktops) if desktops else "not named by XDG_CURRENT_DESKTOP"
+            mismatch = (
                 f"{backend.name}.portal declares UseIn={';'.join(backend.use_in)}, and "
-                f"this session is "
-                + (", ".join(desktops) if desktops else "not named by XDG_CURRENT_DESKTOP")
-                + ". The backend will still answer, because the configuration names "
-                "it, but it is reading settings from a desktop that is not running - "
-                "which is how an interface comes to be answered confidently and "
-                "wrongly. A backend outside its own desktop typically cannot find the "
-                "configuration it was written against and falls back to a built-in "
-                "default."
+                f"this session is {session}. The backend still answers, because the "
+                "configuration names it, but it is reading settings from a desktop "
+                "that is not running - which is how an interface comes to be answered "
+                "confidently and wrongly. A backend outside its own desktop usually "
+                "cannot find the configuration it was written against, and falls back "
+                "to a built-in default that nothing on this machine can change."
             )
-        return (backend.name, severity, gloss, extra)
+            out.extra = f"{out.extra}\n\n{mismatch}" if out.extra else mismatch
+            if critical:
+                out.severity = WARNING
+                out.gloss = f"{out.gloss}, and built for another desktop"
+                out.problem = (
+                    f"{assignment.short} — {backend.name} is built for "
+                    f"{';'.join(backend.use_in)}, not for this session"
+                )
+            else:
+                out.gloss = f"{out.gloss}; built for {';'.join(backend.use_in)}"
+        return out
 
     if assignment.problem:
-        return (
+        return Presentation(
             "Nothing implements it",
             WARNING,
             assignment.gloss,
             assignment.problem[0].upper() + assignment.problem[1:] + ".",
+            f"{assignment.short} — {assignment.problem}",
         )
 
     if assignment.fallback is not None:
-        return (
+        return Presentation(
             "Not configured",
             NORMAL,
             f"{assignment.fallback.name} would answer, because {assignment.fallback_reason}",
-            "",
         )
 
-    return ("Not configured", NORMAL, "and nothing installed would answer it", "")
+    return Presentation("Not configured", NORMAL, "and nothing installed would answer it")
 
 
 def _backend_rows(probe, backends, desktops) -> list[Row]:
@@ -1046,12 +1129,12 @@ def _interface_rows(probe, config, backends, desktops) -> list[Row]:
     problems: list[str] = []
     for interface in sorted(universe, key=lambda name: short_interface(name).lower()):
         assignment = assign(interface, config, backends, desktops)
-        value, severity, gloss, extra = _assignment_value(assignment, desktops)
-        if severity == WARNING:
-            problems.append(f"{assignment.short} — {gloss}")
+        shown = _present(assignment, desktops, critical=interface == SETTINGS_INTERFACE)
+        if shown.problem:
+            problems.append(shown.problem)
         lead = f"The full interface name is {interface}."
-        if extra:
-            lead += "\n\n" + extra
+        if shown.extra:
+            lead += "\n\n" + shown.extra
         if assignment.decision == UNSET and assignment.fallback is not None:
             lead += (
                 "\n\nNothing in the configuration decides this interface. "
@@ -1063,10 +1146,10 @@ def _interface_rows(probe, config, backends, desktops) -> list[Row]:
             probe.row(
                 "portal_interface",
                 assignment.short,
-                value,
-                severity=severity,
+                shown.value,
+                severity=shown.severity,
                 key=f"interface:{assignment.short}",
-                gloss=gloss,
+                gloss=shown.gloss,
                 body=_body(lead, assignment.trace),
             )
         )

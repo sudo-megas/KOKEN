@@ -34,6 +34,7 @@ from .base import (
     path_exists,
     read_first_line,
 )
+from . import portals
 
 # How many lines one expansion will carry before it says how many it left out.
 # A desktop with four hundred applications lists all four hundred; the cap is
@@ -48,7 +49,7 @@ SOURCE_NAMES = (
     ("flatpak", "settled by Flatpak metadata"),
     ("packages", "settled by the package database"),
     ("unresolved", "named a command that is not installed"),
-    ("network", "sat on a network filesystem and were not visited"),
+    ("network", "on a network filesystem, and not visited"),
 )
 
 # Read for the Overview section, in this order.
@@ -97,7 +98,12 @@ class DesktopProbe(Probe):
     label = "Desktop"
 
     def sections(self) -> list[Section]:
-        return [self._overview(), self._session(), self._toolkits()]
+        return [
+            self._overview(),
+            self._session(),
+            self._toolkits(),
+            portals.section(self),
+        ]
 
     # -- overview ---------------------------------------------------------
 
@@ -273,7 +279,7 @@ class DesktopProbe(Probe):
         order = sorted(toolkits.TOOLKITS, key=lambda item: (-counts[item.key], item.rank))
 
         section.add(self._scan_row(survey, total))
-        section.add(self._mix_row(survey, counts, total))
+        section.add(self._mix_row(counts, total))
         for toolkit in order:
             section.add(self._toolkit_row(toolkit, survey, counts[toolkit.key]))
         section.add(self._list_row(survey, order, total))
@@ -315,9 +321,9 @@ class DesktopProbe(Probe):
             )
         if survey.network_skipped:
             notes.append(
-                f"{survey.network_skipped} path(s) on a network filesystem, which "
-                "are never visited: a server that has stopped answering turns "
-                "reading a file into an unbounded wait"
+                f"{_plural(survey.network_skipped, 'path', 'paths')} on a network "
+                "filesystem, which are never visited: a server that has stopped "
+                "answering turns reading a file into a wait with no end to it"
             )
         sources = [
             f"{count} {phrase}"
@@ -332,32 +338,37 @@ class DesktopProbe(Probe):
             "Nothing on this page was started to produce it.",
             lines + _titled("How each was settled", sources) + _titled("Not counted", notes),
         )
-        return self.row(
-            "toolkit_scan",
-            "Applications scanned",
-            str(total),
-            gloss=(
-                f"from {_plural(len(survey.directories), 'directory', 'directories')}"
-                if survey.directories
-                else "no applications directory exists here"
-            ),
-            body=body,
-        )
+        if not survey.directories:
+            gloss = "no applications directory exists here"
+        elif survey.skipped:
+            gloss = (
+                f"from {_plural(len(survey.directories), 'directory', 'directories')}, "
+                f"{survey.skipped} left unread when the time budget ran out"
+            )
+        else:
+            gloss = f"from {_plural(len(survey.directories), 'directory', 'directories')}"
+        return self.row("toolkit_scan", "Applications scanned", str(total), gloss=gloss, body=body)
 
-    def _mix_row(self, survey, counts: dict, total: int):
+    def _mix_row(self, counts: dict, total: int):
         used = [key for key, count in counts.items() if count]
         if not total:
             return self.row("toolkit_mix", "Toolkit mix", "No applications found")
-        leader = max(used, key=lambda key: counts[key]) if used else ""
-        gloss = ""
-        if leader:
-            label = toolkits.TOOLKIT_BY_KEY[leader].label
-            gloss = f"{label} leads, with {counts[leader]} of {total} applications"
+        if not used:
+            return self.row(
+                "toolkit_mix",
+                "Toolkit mix",
+                "None identified",
+                gloss=f"of {_plural(total, 'application', 'applications')}",
+            )
+        leader = max(used, key=lambda key: counts[key])
         return self.row(
             "toolkit_mix",
             "Toolkit mix",
             f"{_plural(len(used), 'toolkit', 'toolkits')} in use",
-            gloss=gloss,
+            gloss=(
+                f"{toolkits.TOOLKIT_BY_KEY[leader].label} leads, with "
+                f"{counts[leader]} of {total} applications"
+            ),
         )
 
     def _toolkit_row(self, toolkit, survey, count: int):
@@ -376,7 +387,14 @@ class DesktopProbe(Probe):
             value = "No system-wide copy"
         else:
             value = "Not installed"
-        if count:
+        if count and not installed.present:
+            # Something links a library that is not on this machine. Either it
+            # is sandboxed and carries its own, or it will not start.
+            gloss = (
+                f"{_plural(count, 'application', 'applications')} "
+                f"{'links' if count == 1 else 'link'} it anyway"
+            )
+        elif count:
             gloss = _plural(count, "application", "applications")
         elif installed.present:
             gloss = "installed, nothing here uses it"
@@ -409,7 +427,10 @@ class DesktopProbe(Probe):
                 listed += 1
         if remaining:
             lines.append("")
-            lines.append(f"{remaining} further application(s) not listed here.")
+            lines.append(
+                f"{_plural(remaining, 'further application', 'further applications')} "
+                "not listed here."
+            )
 
         classified = total - len(survey.unclassified)
         if not classified:

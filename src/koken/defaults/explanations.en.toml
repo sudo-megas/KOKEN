@@ -691,6 +691,203 @@ or dark, so it can pick a matching palette and change with it. If the portal is
 not there, KOKEN uses its dark palette and everything else works as normal.
 """
 
+[system.desktop.toolkit_mix]
+long = """
+How many different toolkits the applications on this machine are built with.
+
+Nothing is wrong with a mixed desktop - a GNOME session with Qt applications on
+it, or a KDE session with GTK ones, is the normal state of Linux and has been
+for twenty years. It is worth knowing because it is the reason a desktop can
+never look entirely consistent: each toolkit draws its own widgets, reads its
+own theme from its own file, and decides scaling, cursor size and font hinting
+for itself. A setting applied in one desktop's settings panel reaches the
+applications built with that desktop's toolkit and stops there.
+
+The count is of toolkits actually used by something installed here, not of
+toolkits present on the machine. A library can be installed because another
+package depends on it and be drawing nothing.
+"""
+
+[system.desktop.toolkit_gtk4]
+long = """
+GTK 4, the current major version of the GNOME toolkit.
+
+GTK 4 reads its appearance from gtk-4.0/gtk.css and from the libadwaita
+stylesheet, and it cannot read a GTK 3 theme. The widget names, the CSS nodes
+and the drawing model all changed between the two, so a theme written for GTK 3
+has nothing GTK 4 can apply, and it is ignored rather than half-applied. That is
+the whole answer to why installing a theme leaves some windows changed and some
+untouched: the untouched ones are on the other major version.
+
+GTK 4 draws through GSK, which means it wants a working GPU path and falls back
+to software rendering when it does not get one. Its light or dark preference
+comes from the desktop's colour-scheme setting rather than from the theme name,
+which is why a GTK 4 application can follow a switch to dark mode while an older
+one on the same screen does not.
+"""
+
+[system.desktop.toolkit_gtk3]
+long = """
+GTK 3, still the most common toolkit on Linux by application count.
+
+GTK 3 reads gtk-3.0/gtk.css and the theme named in its own settings - a
+different file and a different setting from GTK 4's. A desktop running both, and
+nearly every desktop runs both, is theming them separately whether or not the
+settings panel admits it, so a GTK 3 application keeps its old appearance until
+a GTK 3 build of the theme is installed as well. Icon themes are the exception:
+those are shared.
+
+GTK 3 is in long-term maintenance rather than development. An application still
+built on it is not neglected so much as not yet moved; the port to GTK 4 is a
+substantial rewrite of a program's entire interface layer.
+"""
+
+[system.desktop.toolkit_gtk2]
+long = """
+GTK 2, which has had no release since 2020.
+
+GTK 2 takes its appearance from a theme engine - a compiled plugin - rather than
+from CSS, so a GTK 2 application cannot use any theme made in the last decade
+and falls back to the default grey unless a matching GTK 2 engine and gtkrc are
+installed alongside. It also has no display scaling at all: on a HiDPI screen it
+is drawn one physical pixel per logical pixel and comes out half size, with no
+setting anywhere that will change that.
+
+Anything still here is either very old or deliberately frozen. It will keep
+working; it will not keep up.
+"""
+
+[system.desktop.toolkit_qt6]
+long = """
+Qt 6, the current major version of the Qt toolkit, used by KDE and by KOKEN.
+
+Qt 6 scales fractionally, per screen, always: the device-pixel-ratio handling
+that was optional in Qt 5 is compiled in and switched on, so a Qt 6 application
+on a display set to 150% renders at 150% rather than at 100% or 200%.
+
+It also reads its own settings rather than the desktop's. A GNOME or Xfce
+session hands a Qt application no widget style, no icon theme and no font unless
+qt6ct or a Qt platform theme plugin is installed to translate between them - and
+the Qt 5 translation layer does not serve Qt 6. That is why Qt 5 and Qt 6
+applications on one desktop can disagree about icons, fonts and cursor size at
+the same time: they are reading two different sets of settings, and for the
+cursor in particular Qt 6 asks the compositor while Qt 5 reads the old X
+resource.
+"""
+
+[system.desktop.toolkit_qt5]
+long = """
+Qt 5, the previous major version, still shipping a great deal of software.
+
+Qt 5 scales by whole numbers unless it is told otherwise. Fractional scaling
+needs QT_ENABLE_HIGHDPI_SCALING or QT_SCALE_FACTOR set for it, and without them a
+Qt 5 application on a 150% display is the one rendering noticeably smaller or
+larger than its Qt 6 and GTK 4 neighbours.
+
+Its cursor size comes from the X resource rather than from the compositor, which
+is the usual reason one window shows a cursor of a different size from the
+desktop around it. Its style, icons and fonts come from qt5ct or a Qt 5 platform
+theme, neither of which has any effect on Qt 6 - so a machine running both needs
+both configured before they agree.
+"""
+
+[system.desktop.toolkit_wx]
+long = """
+wxWidgets, which on Linux is a layer over GTK rather than a widget set of its
+own.
+
+Every wx binary links GTK for that reason, and KOKEN files it as wx rather than
+as GTK because the GTK soname comes from the wrapper, not from the application's
+own code. In practice a wx application inherits the GTK theme and the GTK file
+dialog, so it mostly looks right, but its layout, menus and dialogs are wx's
+idea of those things rather than the desktop's, and a GTK setting reaches it
+only as far as wx passes it through.
+
+wx exists so that one program can be built for Windows, macOS and Linux with one
+interface. That is what it is good at, and what it costs.
+"""
+
+[system.desktop.toolkit_tk]
+long = """
+Tk, the widget set that ships with Tcl and, through tkinter, with Python.
+
+Tk draws its own controls and reads no desktop setting at all: not the theme,
+not the icon set, not the font, not the cursor size, not the scaling factor. A
+Tk application looks the same on every desktop, which is to say it looks like
+nothing else on any of them, and on a HiDPI screen it is drawn at native pixel
+size and comes out small.
+
+It is here because it costs almost nothing and starts instantly. For a small
+utility that is a fair trade, and it is why so many one-window tools are built
+with it.
+"""
+
+[system.desktop.toolkit_java]
+long = """
+A Java application is a launcher that starts a virtual machine and hands it a
+jar.
+
+The widgets are drawn inside that machine, by Swing or by SWT, and not by any
+library the system linker loaded. That is why a Java application looks like
+itself everywhere, and why the GTK look and feel it may offer is an imitation
+drawn by Java rather than GTK doing the drawing.
+
+Two consequences show up on a modern desktop. Display scaling is the JVM's own
+setting rather than the desktop's, so a Java application on a HiDPI screen is
+often the one rendering at half size until sun.java2d.uiScale is set for it. And
+font rendering is Java's own, so hinting and antialiasing settings applied to
+everything else stop at its window edge.
+"""
+
+[system.desktop.toolkit_electron]
+long = """
+Electron applications are web pages. Each one carries its own copy of Chromium
+and its own copy of Node.
+
+Nothing is shared between two of them, so the browser engine inside one has
+nothing to do with the one inside the next, or with any browser installed on
+this machine. Ten Electron applications are ten copies, and each is patched, or
+not patched, on its own schedule.
+
+That is also where the memory goes: a single Electron application starts a
+browser engine, a renderer process per window, a GPU process and a utility
+process before it has drawn anything, and two hundred megabytes resident is
+ordinary rather than exceptional. They draw their own widgets too, which is why
+an Electron application ignores the system widget theme, the system font
+settings and usually the system title bar, and why its text selection and
+scrollbars behave like a web page rather than like the rest of the desktop.
+
+KOKEN files these ahead of GTK deliberately. An Electron binary does link GTK 3,
+for the window and the file dialog, but calling it a GTK 3 application would say
+nothing true about it.
+"""
+
+[system.desktop.toolkit_method]
+long = """
+How this page knows, given that it never starts any of these programs.
+
+Every answer here is read out of a file. The desktop entry names a command; the
+command is resolved against PATH here rather than by asking a shell; the file it
+names is followed through whatever wrapper scripts sit in the way; and the
+executable at the end of that is opened and its DT_NEEDED list read - the same
+list the dynamic linker reads every time the program starts, naming the
+libraries it will load. A binary with libgtk-4.so.1 in that list will load GTK 4.
+That is not an inference about the program, it is the instruction the loader
+acts on.
+
+Where a binary links no toolkit itself, the libraries it does name are opened
+one level down, because a large application keeps its interface in a library of
+its own. Electron is recognised by the files beside it, Flatpak applications by
+their deployed files and their runtime, scripts by what they import, and a small
+number of leftovers by what their package declares it depends on.
+
+It can still be wrong in one direction. A program that loads its toolkit with
+dlopen at runtime - LibreOffice does, and so does anything with a plugin-based
+interface layer - links nothing at all, and is reported as unclassified rather
+than guessed at. Nothing here is ever the wrong toolkit; some of it is no
+answer.
+"""
+
 # ---- Security ------------------------------------------------------------
 
 [system.security.secure_boot]
