@@ -11,7 +11,7 @@ handover point in §8.
 
 ## 1. ENVIRONMENT
 
-Claude Code Web, Arch container.
+A headless Arch container. No display, no real hardware.
 
 ```bash
 pacman -Syu --noconfirm python python-pyside6 hwdata udisks2 dmidecode polkit git base-devel
@@ -301,8 +301,10 @@ git add -A
 git commit -m "add cpu cache topology probe"
 ```
 
-**No AI attribution.** No `Co-Authored-By`, no `Generated with`, nothing in the
-body. Configure this before the first commit and do not deviate.
+**No attribution trailers.** No `Co-Authored-By`, no `Generated with`, nothing
+in the body naming anything but the change itself. Every commit is authored by
+`sudo-megas` and nobody else. Configure this before the first commit and do not
+deviate.
 
 When §3 is complete and the app runs, tag locally:
 
@@ -493,14 +495,14 @@ Produce `koken-v1.0-source.zip` containing the entire working tree **including t
 `.git` directory** so that commit history and the local tag survive the transfer.
 
 ```bash
-cd /home/claude
-zip -r koken-v1.0-source.zip koken/ -x '*/__pycache__/*' '*.pyc'
+cd "$(dirname "$PWD")"
+zip -r koken-v1.0-source.zip KOKEN/ -x '*/__pycache__/*' '*.pyc'
 ```
 
 Confirm the archive contains `.git`:
 
 ```bash
-unzip -l koken-v1.0-source.zip | grep -c "koken/.git/"
+unzip -l koken-v1.0-source.zip | grep -c "KOKEN/.git/"
 ```
 
 Then hand over with a summary stating: every §5 check and its result, the commit

@@ -62,9 +62,10 @@ These are absolute. Violating any of them is a build failure.
    per-attribute SMART table has no other interface this Qt binding can read.
    Neither is required for the application to run, and adding a third needs an
    amendment to this document.
-5. **No AI attribution anywhere.** No `Co-Authored-By` trailers, no
-   `Generated with` lines, no mention in commits, README, About page or release
-   notes. This is the standing rule for this repository.
+5. **No attribution but the maker's.** No `Co-Authored-By` trailers, no
+   `Generated with` lines, nothing in commits, README, About page or release
+   notes crediting anyone or anything other than `sudo-megas`. This is the
+   standing rule for this repository.
 6. **No clickable links.** Addresses in the About section are selectable text. The
    app opens no browser and follows no URL.
 
@@ -807,7 +808,8 @@ the base and the alternating surface.
 ## 13.7 Application icon and banner
 
 Both assets are **supplied** and present in the repository from the first commit.
-Neither is the agent's to invent, redraw, recolour, crop, re-render or regenerate.
+Neither is to be invented, redrawn, recoloured, cropped, re-rendered or
+regenerated during the build.
 If either is missing, ship without it and say so in the handover.
 
 | File | What it is | Used for |
