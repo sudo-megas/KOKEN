@@ -25,7 +25,7 @@ Depends: ${python3:Depends},
          hwdata,
          udisks2,
          dmidecode,
-         policykit-1
+         pkexec
 Description: Machine Corpus - a hardware and system browser that explains itself
  KOKEN reads what this machine is made of and says, in plain language, what
  each value means and why it might matter. It is offline and read-only: it
@@ -38,3 +38,7 @@ Description: Machine Corpus - a hardware and system browser that explains itself
  .
  Debian ships PySide6 split into one binary package per Qt module, which is why
  four of them are named here rather than one. That is expected, not a mistake.
+ .
+ pkexec rather than policykit-1: the policykit-1 binary package was transitional
+ in bookworm and does not exist in trixie at all. Its source package now builds
+ pkexec and polkitd, and pkexec depends on polkitd, so naming pkexec brings both.
