@@ -125,11 +125,19 @@ def channel_of(locator: str | None, bank_locator: str | None) -> str | None:
 
 
 def _populated(record: dict) -> bool:
+    """Whether this slot has a module in it.
+
+    An empty slot is usually written `No Module Installed`, which parses to
+    None. Some firmware writes `0 MB` instead, which parses to a perfectly
+    valid zero - and counting that as a module gives a machine with two sticks
+    in four slots a slot count of four, all of them "populated", next to a
+    total that adds up to the two.
+    """
     fields = record.get("fields", {})
     size = fields.get("Size")
     if not size:
         return False
-    return parse_dmi_size(size) is not None
+    return bool(parse_dmi_size(size))
 
 
 class MemoryProbe(Probe):
@@ -340,7 +348,9 @@ class MemoryProbe(Probe):
         bank = fields.get("Bank Locator")
         size = parse_dmi_size(fields.get("Size"))
 
-        if size is None:
+        # `or None` for the same reason _populated does it: a `0 MB` slot is an
+        # empty one, and the row below would otherwise read "0 B".
+        if not size:
             return [
                 self.row(
                     "dimm_empty",

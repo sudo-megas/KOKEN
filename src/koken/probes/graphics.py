@@ -238,8 +238,8 @@ class GraphicsProbe(Probe):
                 self.row(
                     "link",
                     "PCIe link",
-                    "This device does not report its link state. An integrated "
-                    "graphics processor has no PCIe link to report.",
+                    "This device does not report its link state. Integrated "
+                    "graphics never do, and some discrete drivers do not either.",
                 )
             ]
 
@@ -415,7 +415,11 @@ class GraphicsProbe(Probe):
                     )
                 )
             elif name.startswith("power") and name.endswith(("_average", "_input")):
-                stem = name.rsplit("_", 1)[0]
+                # amdgpu publishes both an averaged and an instantaneous
+                # reading for the same channel. Collapsing the suffix would
+                # give them the same label and the same key, which is two
+                # contradictory rows the volatile pass cannot tell apart.
+                stem, _, kind = name.rpartition("_")
                 value = read_int(hwmon / name)
                 cap = read_int(hwmon / f"{stem}_cap")
                 text = f"{value / 1_000_000:.1f} W" if value is not None else NOT_AVAILABLE
@@ -424,10 +428,10 @@ class GraphicsProbe(Probe):
                 rows.append(
                     self.row(
                         "power",
-                        "Power draw",
+                        "Power draw, average" if kind == "average" else "Power draw",
                         text,
                         tier=VOLATILE,
-                        key=f"{hwmon.name}{stem}",
+                        key=f"{hwmon.name}{stem}{kind}",
                     )
                 )
         return rows

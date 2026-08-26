@@ -163,9 +163,19 @@ def read_serials(errors):
     return serials
 
 
+# Most lines are `ME feature version: 39, firmware version: 0x0000004e`, but
+# not all of them. The SMC block - the power management microcontroller, and
+# the one entry in this table anybody looks up on purpose - writes an extra
+# field in the middle and a decoded version in brackets at the end:
+#
+#     SMC feature version: 0, program: 0, firmware version: 0x003b3600 (59.54.0)
+#
+# A pattern that demands `firmware version:` immediately after the comma, and a
+# single unbroken token after that, matches neither half of it and drops the
+# line entirely.
 _FIRMWARE_LINE = re.compile(
-    r"^(?P<block>.+?)\s+feature version:\s*(?P<feature>\S+?),\s*"
-    r"firmware version:\s*(?P<firmware>\S+)\s*$"
+    r"^(?P<block>.+?)\s+feature version:\s*(?P<feature>[^,]*?)\s*,"
+    r"(?P<extra>(?:[^,]*,)*?)\s*firmware version:\s*(?P<firmware>.+?)\s*$"
 )
 _VBIOS_LINE = re.compile(r"^VBIOS version:\s*(?P<value>.+?)\s*$", re.IGNORECASE)
 

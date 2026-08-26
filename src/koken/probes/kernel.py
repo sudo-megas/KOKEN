@@ -132,12 +132,75 @@ def _int_or_none(text: str) -> int | None:
 
 
 def decode_taint(value: int | None) -> list[str]:
-    if not value:
+    """The taint bitmap into the list of reasons it is set.
+
+    Negative is refused rather than decoded. ``/proc/sys/kernel/tainted`` is an
+    unsigned long and never negative, but a Python int is not a machine word:
+    ``-1 & (1 << bit)`` is true for every bit, so a garbage read would be
+    rendered as a kernel tainted in all eighteen ways at once.
+    """
+    if not value or value < 0:
         return []
     out = []
     for bit in range(0, 32):
         if value & (1 << bit):
             out.append(TAINT_FLAGS.get(bit, f"bit {bit} is set"))
+    return out
+
+
+def parse_cmdline(text: str) -> list[tuple[str, str | None]]:
+    """``/proc/cmdline`` into (parameter, value) pairs, the way the kernel does.
+
+    A plain ``text.split()`` is wrong, and wrong in a way that shows. The
+    kernel's own ``next_arg`` in ``init/main.c`` honours double quotes, so
+    ``dm-mod.create="root,,,ro,0 4096 linear /dev/sda2 0"`` - which is what an
+    encrypted or LVM root on a dracut system boots with - is one parameter.
+    Splitting on whitespace turns it into six, five of which are fragments with
+    no meaning at all, and inflates the parameter count to match.
+    """
+    out: list[tuple[str, str | None]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        start = index
+        quoted = False
+        if text[index] == '"':
+            index += 1
+            start = index
+            quoted = True
+        in_quote = quoted
+        equals = 0
+        offset = 0
+        while index < length:
+            character = text[index]
+            if character.isspace() and not in_quote:
+                break
+            if equals == 0 and character == "=":
+                equals = offset
+            if character == '"':
+                in_quote = not in_quote
+            index += 1
+            offset += 1
+        token = text[start:index]
+        if quoted and token.endswith('"'):
+            token = token[:-1]
+        if not equals:
+            out.append((token, None))
+        else:
+            name = token[:equals]
+            value = token[equals + 1 :]
+            # The kernel strips the quotes from the value rather than showing
+            # them, so `root="/dev/sda 1"` reads as `/dev/sda 1`.
+            if value.startswith('"'):
+                value = value[1:]
+                if value.endswith('"'):
+                    value = value[:-1]
+            out.append((name, value))
+        index += 1
     return out
 
 
@@ -218,11 +281,17 @@ class KernelProbe(Probe):
 
         taint = read_int("/proc/sys/kernel/tainted")
         flags = decode_taint(taint)
+        if taint is None or taint < 0:
+            taint_text = NOT_AVAILABLE
+        elif not flags:
+            taint_text = "Not tainted"
+        else:
+            taint_text = f"{taint} — {'; '.join(flags)}"
         section.add(
             self.row(
                 "tainted",
                 "Taint",
-                "Not tainted" if not flags else f"{taint} — {'; '.join(flags)}",
+                taint_text,
                 severity=WARNING if flags else "normal",
             )
         )
@@ -271,15 +340,14 @@ class KernelProbe(Probe):
             return section
 
         section.add(self.row("cmdline", "Full command line", text))
-        tokens = text.split()
-        section.add(self.row("cmdline_count", "Parameters", str(len(tokens))))
-        for index, token in enumerate(tokens):
-            name, separator, value = token.partition("=")
+        parameters = parse_cmdline(text)
+        section.add(self.row("cmdline_count", "Parameters", str(len(parameters))))
+        for index, (name, value) in enumerate(parameters):
             section.add(
                 self.row(
                     "cmdline_parameter",
                     f"  {name}",
-                    value if separator else "set, with no value",
+                    "set, with no value" if value is None else value,
                     key=f"param{index}{name}",
                 )
             )

@@ -121,9 +121,16 @@ _root = Path("/")
 
 
 def set_root(path: str | Path) -> None:
-    """Point every reader at *path* instead of ``/``."""
+    """Point every reader at *path* instead of ``/``.
+
+    The path is made absolute first. The "already inside the root" check in
+    :func:`resolve` compares against ``_root``, and with a relative root every
+    path handed back by the glob helpers would be rooted a second time - so
+    every probe would quietly report absent hardware instead of failing
+    loudly.
+    """
     global _root
-    _root = Path(path)
+    _root = Path(path).resolve()
 
 
 def get_root() -> Path:
@@ -370,8 +377,15 @@ def fmt_int(value: int | None) -> str:
 
 
 def fmt_duration(seconds: float | None) -> str:
-    """A span in days, hours and minutes. Used for uptime and power-on hours."""
-    if seconds is None:
+    """A span in days, hours and minutes. Used for uptime and power-on hours.
+
+    A negative span is refused rather than formatted. divmod on a negative
+    total is perfectly happy to answer "-1 days, 23 hours, 48 minutes", which
+    is a confident-looking sentence about a quantity that cannot be negative;
+    some battery drivers sign their discharge rate and would produce exactly
+    that.
+    """
+    if seconds is None or seconds < 0:
         return NOT_AVAILABLE
     total = int(seconds)
     days, rest = divmod(total, 86400)
@@ -387,7 +401,14 @@ def fmt_duration(seconds: float | None) -> str:
 
 
 def fmt_list(items, empty: str = NONE_PRESENT, separator: str = ", ") -> str:
-    items = [str(item) for item in items if item]
+    """Join items, dropping only the ones that are genuinely absent.
+
+    The filter tests against None and the empty string rather than for
+    truthiness, because several callers pass integers and one of them is zero:
+    cpu0 is the SMT sibling of every first thread on the machine, and a
+    truthiness test would report it as having no sibling at all.
+    """
+    items = [str(item) for item in items if item is not None and str(item) != ""]
     return separator.join(items) if items else empty
 
 

@@ -67,7 +67,12 @@ ESTABLISHED_TIMINGS = (
     (2, 7, "1152x870 @ 75 Hz"),
 )
 
+# Standard timing aspect ratios, byte 2 bits 7-6. Code 0 changed meaning: it
+# is 1:1 in EDID 1.0 through 1.2 and 16:10 from 1.3 onward, and the structure
+# carries no other clue which it is. Reading a 1.2 display's 1280x1280 mode as
+# 1280x800 is not a rounding error, it is a different mode.
 ASPECT_RATIOS = {0: (16, 10), 1: (4, 3), 2: (5, 4), 3: (16, 9)}
+ASPECT_RATIOS_PRE_1_3 = {0: (1, 1), 1: (4, 3), 2: (5, 4), 3: (16, 9)}
 
 
 @dataclass
@@ -255,7 +260,7 @@ def _parse_checked(blob: bytes, length: int) -> Edid:
     edid.features = names
 
     edid.established = _established(blob)
-    edid.standard = _standard(blob)
+    edid.standard = _standard(blob, (blob[18], blob[19]))
     _descriptors(blob, edid)
     edid.extensions = blob[126]
     return edid
@@ -269,7 +274,8 @@ def _established(blob: bytes) -> list[str]:
     return out
 
 
-def _standard(blob: bytes) -> list[str]:
+def _standard(blob: bytes, version: tuple[int, int] = (1, 3)) -> list[str]:
+    ratios = ASPECT_RATIOS if version >= (1, 3) else ASPECT_RATIOS_PRE_1_3
     out = []
     for index in range(8):
         first = blob[38 + index * 2]
@@ -280,7 +286,7 @@ def _standard(blob: bytes) -> list[str]:
         if first == 0x00:
             continue
         width = (first + 31) * 8
-        ratio = ASPECT_RATIOS.get((second >> 6) & 0x03)
+        ratio = ratios.get((second >> 6) & 0x03)
         refresh = (second & 0x3F) + 60
         if ratio:
             height = width * ratio[1] // ratio[0]

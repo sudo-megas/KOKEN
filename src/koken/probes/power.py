@@ -332,52 +332,54 @@ class PowerProbe(Probe):
                 )
             )
 
+        # Every volatile row below is emitted on every pass, including when it
+        # has nothing to say. A row that disappears from sample() is simply not
+        # updated, and the widget keeps whatever it last said - so plugging the
+        # machine in would leave "About 2 hours left" on screen indefinitely.
         power = read_int(path / "power_now")
         current = read_int(path / "current_now")
         if power is not None:
-            rows.append(
-                self.row(
-                    "battery_draw",
-                    "  Drawing",
-                    f"{power / 1_000_000:.2f} W",
-                    tier=VOLATILE,
-                    key=f"{prefix}draw",
-                )
-            )
+            draw = f"{abs(power) / 1_000_000:.2f} W"
         elif current is not None and voltage is not None:
-            watts = (current / 1_000_000) * (voltage / 1_000_000)
-            rows.append(
-                self.row(
-                    "battery_draw",
-                    "  Drawing",
-                    f"{watts:.2f} W — worked out from current and voltage",
-                    tier=VOLATILE,
-                    key=f"{prefix}draw",
-                )
+            watts = (abs(current) / 1_000_000) * (abs(voltage) / 1_000_000)
+            draw = f"{watts:.2f} W — worked out from current and voltage"
+        else:
+            draw = NOT_REPORTED
+        rows.append(
+            self.row(
+                "battery_draw",
+                "  Drawing",
+                draw,
+                tier=VOLATILE,
+                key=f"{prefix}draw",
             )
+        )
 
         now, _design, unit = _capacity_pair(path, use_now=True)
-        if now:
-            rows.append(
-                self.row(
-                    "battery_stored",
-                    "  Stored",
-                    _quantity(now, unit),
-                    tier=VOLATILE,
-                    key=f"{prefix}stored",
-                )
+        rows.append(
+            self.row(
+                "battery_stored",
+                "  Stored",
+                _quantity(now, unit) if now else NOT_REPORTED,
+                tier=VOLATILE,
+                key=f"{prefix}stored",
             )
-        remaining = _time_remaining(now, power, current, status)
-        if remaining:
-            rows.append(
-                self.row(
-                    "battery_remaining",
-                    "  Estimated time",
-                    remaining,
-                    tier=VOLATILE,
-                    key=f"{prefix}remaining",
-                )
+        )
+        remaining = _time_remaining(now, unit, power, current, voltage, status)
+        if remaining is None:
+            if status == "Discharging":
+                remaining = "Not enough information to estimate"
+            else:
+                remaining = "Only estimated while running on battery"
+        rows.append(
+            self.row(
+                "battery_remaining",
+                "  Estimated time",
+                remaining,
+                tier=VOLATILE,
+                key=f"{prefix}remaining",
             )
+        )
         return rows
 
     # -- supplies ---------------------------------------------------------
@@ -485,16 +487,30 @@ class PowerProbe(Probe):
         return out
 
 
+_FAMILIES = (
+    ("charge_now", "charge_full", "charge_full_design", "Ah"),
+    ("energy_now", "energy_full", "energy_full_design", "Wh"),
+)
+
+
 def _capacity_pair(path, use_now: bool = False) -> tuple[int | None, int | None, str]:
-    """Current-or-full and design capacity, in whichever unit the battery uses."""
-    for now_name, full_name, design_name, unit in (
-        ("charge_now", "charge_full", "charge_full_design", "Ah"),
-        ("energy_now", "energy_full", "energy_full_design", "Wh"),
-    ):
-        design = read_int(path / design_name)
+    """Current-or-full and design capacity, in whichever unit the battery uses.
+
+    A battery reports either a charge in microampere-hours or an energy in
+    microwatt-hours, and a few report parts of both. The family that has the
+    value being asked for wins; taking the first family where *anything* was
+    readable can return a design capacity from one family while the matching
+    current value sits unread in the other, and health then reads "Not
+    reported" for a battery that could have answered.
+    """
+    for now_name, full_name, design_name, unit in _FAMILIES:
         first = read_int(path / (now_name if use_now else full_name))
-        if first is not None or design is not None:
-            return first, design, unit
+        if first is not None:
+            return first, read_int(path / design_name), unit
+    for _now_name, _full_name, design_name, unit in _FAMILIES:
+        design = read_int(path / design_name)
+        if design is not None:
+            return None, design, unit
     return None, None, ""
 
 
@@ -504,14 +520,36 @@ def _quantity(microunits: int, unit: str) -> str:
     return f"{microunits / 1_000_000:.2f} {unit}"
 
 
-def _time_remaining(stored, power, current, status) -> str | None:
-    """Roughly how long, at the rate right now. Deliberately not precise."""
-    if not stored or not status:
+def _time_remaining(stored, unit, power, current, voltage, status) -> str | None:
+    """Roughly how long, at the rate right now. Deliberately not precise.
+
+    Both sides are converted to the same units before dividing. A battery may
+    report what it holds as a charge (Ah) or an energy (Wh), and its rate as a
+    power (W) or a current (A), and the two choices are independent - so a
+    straight division can be amp-hours over watts, which is not a time and is
+    out by whatever the pack voltage happens to be.
+
+    Magnitudes are taken, because several drivers sign the discharge rate
+    negative and a negative duration is not a thing.
+    """
+    if not stored or status != "Discharging":
         return None
-    rate = power or current
-    if not rate:
+
+    volts = (abs(voltage) / 1_000_000) if voltage else None
+    if unit == "Wh":
+        watt_hours = abs(stored) / 1_000_000
+    elif unit == "Ah" and volts:
+        watt_hours = (abs(stored) / 1_000_000) * volts
+    else:
         return None
-    hours = stored / rate
-    if status == "Discharging":
-        return f"About {fmt_duration(hours * 3600)} left at the present rate"
-    return None
+
+    if power:
+        watts = abs(power) / 1_000_000
+    elif current and volts:
+        watts = (abs(current) / 1_000_000) * volts
+    else:
+        return None
+
+    if watts <= 0:
+        return None
+    return f"About {fmt_duration((watt_hours / watts) * 3600)} left at the present rate"

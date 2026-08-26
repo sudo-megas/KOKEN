@@ -100,6 +100,14 @@ class NetworkProbe(Probe):
     def _find_interfaces(self) -> list[dict]:
         interfaces = []
         for path in list_dir(NET_ROOT):
+            # /sys/class/net holds plain files as well as interfaces: the
+            # bonding module drops `bonding_masters` in there, and without this
+            # check it becomes a phantom device with eight rows of nothing.
+            try:
+                if not path.is_dir():
+                    continue
+            except OSError:
+                continue
             wireless = path_exists(path / "wireless") or path_exists(path / "phy80211")
             arp_type = read_int(path / "type")
             interfaces.append(
@@ -219,7 +227,6 @@ class NetworkProbe(Probe):
         rows = []
 
         operstate = read_first_line(path / "operstate")
-        up = operstate == "up"
         rows.append(
             self.row(
                 "operstate",
@@ -250,9 +257,12 @@ class NetworkProbe(Probe):
                     "Not reported. A wireless link has no single fixed rate, so the "
                     "driver declines to answer."
                 )
-            elif not up:
+            elif operstate == "down":
                 detail = "Not reported while the interface is down."
             else:
+                # operstate "unknown" is what virtio_net, tun/tap, WireGuard and
+                # loopback report while fully operational, so "down" would
+                # contradict the state row directly above this one.
                 detail = "Not reported by this driver."
         elif speed < 0:
             detail = "Not negotiated."
@@ -332,7 +342,9 @@ def _speed_text(speed: int) -> str:
     }
     name = names.get(speed)
     if speed >= 1000:
-        base = f"{speed // 1000} Gbit/s"
+        # Not integer division: 2.5 GbE reports 2500, and //1000 renders it as
+        # "2 Gbit/s" right next to the words "2.5 Gigabit Ethernet".
+        base = f"{speed / 1000:g} Gbit/s"
     else:
         base = f"{speed} Mbit/s"
     return f"{base} — {name}" if name else base

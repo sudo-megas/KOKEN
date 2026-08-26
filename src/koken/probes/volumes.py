@@ -27,6 +27,8 @@ guesses written here.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 from .base import (
     NOT_AVAILABLE,
@@ -38,6 +40,7 @@ from .base import (
     fmt_bytes,
     fmt_int,
     fmt_percent,
+    get_root,
     list_dir,
     or_missing,
     path_exists,
@@ -154,12 +157,73 @@ def _int(text):
         return None
 
 
-def is_critical(mount_point: str | None, source: str | None, swaps) -> bool:
+def is_critical(mount_point: str | None, sources, swaps) -> bool:
     if mount_point and mount_point in CRITICAL_MOUNTS:
         return True
-    if source and any(entry["filename"] == source for entry in swaps):
+    names = {sources} if isinstance(sources, str) else set(sources or ())
+    if names and any(entry["filename"] in names for entry in swaps):
         return True
     return False
+
+
+# LVM escapes a hyphen inside a volume group or logical volume name by doubling
+# it, so the group `vg-one` holding the volume `lv-two` becomes the single
+# device-mapper name `vg--one-lv--two`. This splits on the one hyphen that is
+# neither preceded nor followed by another.
+_LVM_SEPARATOR = re.compile(r"(?<!-)-(?!-)")
+
+
+def _lvm_pair(dm_name: str) -> tuple[str, str] | None:
+    parts = _LVM_SEPARATOR.split(dm_name)
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts[0].replace("--", "-"), parts[1].replace("--", "-")
+
+
+def device_aliases(path, name: str) -> set[str]:
+    """Every ``/dev`` name that can stand for this block device.
+
+    This exists because ``/proc/mounts`` and ``/sys/class/block`` do not agree
+    on what a device-mapper volume is called. sysfs calls it ``dm-1``; the
+    kernel writes into ``/proc/mounts`` whatever path was passed to mount, which
+    for LVM is ``/dev/mapper/vg-root`` or ``/dev/vg/root``, and for a LUKS
+    container is ``/dev/mapper/whatever-the-user-named-it``. Matching only on
+    ``/dev/dm-1`` therefore finds no mount record at all, and on a machine whose
+    root filesystem is on LVM - which is most installations that were not set up
+    by hand - the volume holding ``/`` disappears from the Volumes list.
+    """
+    aliases = {f"/dev/{name}"}
+    dm_name = read_first_line(path / "dm/name")
+    if dm_name:
+        aliases.add(f"/dev/mapper/{dm_name}")
+        pair = _lvm_pair(dm_name)
+        if pair is not None:
+            aliases.add(f"/dev/{pair[0]}/{pair[1]}")
+    return aliases
+
+
+def _device_number(path) -> str | None:
+    """The ``major:minor`` this block device answers to, as sysfs writes it."""
+    line = read_first_line(path / "dev")
+    return line if line and ":" in line else None
+
+
+def _stat_device_number(node: str) -> str | None:
+    """``major:minor`` behind a ``/dev`` path, or None if it is not a device.
+
+    Only consulted against the real filesystem. A test root holds a fabricated
+    sysfs whose device numbers are invented, and asking the host's ``/dev``
+    about them would match the wrong hardware rather than nothing.
+    """
+    if get_root() != Path("/"):
+        return None
+    try:
+        info = os.stat(node)
+    except (OSError, ValueError):
+        return None
+    if not (info.st_mode & 0o170000) == 0o060000:  # S_IFBLK
+        return None
+    return f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}"
 
 
 def statvfs_usage(mount_point: str, filesystem_type: str = "") -> dict | None:
@@ -196,7 +260,6 @@ class VolumesProbe(Probe):
         volumes = []
         mounts = parse_mounts(read_lines("/proc/mounts"))
         swaps = parse_swaps(read_lines("/proc/swaps"))
-        by_source = {entry["source"]: entry for entry in mounts}
 
         for path in list_dir(BLOCK_ROOT):
             name = path.name
@@ -204,10 +267,12 @@ class VolumesProbe(Probe):
                 continue
             is_partition = path_exists(path / "partition")
             node = f"/dev/{name}"
+            aliases = device_aliases(path, name)
+            mount = _mount_for(path, aliases, mounts)
             if not is_partition:
                 # A whole device with no partition table can still carry a
                 # filesystem, and an unpartitioned USB stick usually does.
-                if not self._holds_filesystem(node, by_source):
+                if not self._is_volume(path, node, aliases, mount, swaps):
                     continue
             sectors = read_int(path / "size")
             volumes.append(
@@ -215,18 +280,30 @@ class VolumesProbe(Probe):
                     "name": name,
                     "path": path,
                     "node": node,
+                    "aliases": aliases,
                     "size": sectors * SECTOR_BYTES if sectors is not None else None,
                     "partition": is_partition,
                     "number": read_int(path / "partition"),
-                    "mount": by_source.get(node),
+                    "mount": mount,
                     "swaps": swaps,
                     "readonly": read_int(path / "ro"),
                 }
             )
         return volumes
 
-    def _holds_filesystem(self, node, by_source) -> bool:
-        if node in by_source:
+    def _is_volume(self, path, node, aliases, mount, swaps) -> bool:
+        """Whether this whole device is something to list as a volume."""
+        if mount is not None:
+            return True
+        if any(entry["filename"] in aliases for entry in swaps):
+            # Swap is not in /proc/mounts, so a swap volume has no mount record
+            # to be found by. An encrypted swap on device-mapper would vanish.
+            return True
+        if read_first_line(path / "dm/name"):
+            # A device-mapper volume - LVM, LUKS, an integrity or RAID target -
+            # exists because somebody made it. It is a volume whether or not it
+            # is mounted right now, and an unmounted logical volume is exactly
+            # the thing somebody opens this list to look for.
             return True
         udisks = client()
         if not udisks.available:
@@ -370,7 +447,7 @@ class VolumesProbe(Probe):
             "uuid": None,
             "critical": False,
             "is_swap": any(
-                entry["filename"] == volume["node"] for entry in volume["swaps"]
+                entry["filename"] in _aliases_of(volume) for entry in volume["swaps"]
             ),
             "actionable": False,
         }
@@ -413,7 +490,7 @@ class VolumesProbe(Probe):
             state["uuid"] = read_first_line(volume["path"] / "dm/uuid")
 
         state["critical"] = is_critical(
-            state["mount_point"], volume["node"], volume["swaps"]
+            state["mount_point"], _aliases_of(volume), volume["swaps"]
         )
         return state
 
@@ -500,16 +577,45 @@ class VolumesProbe(Probe):
         # the mount records are re-read here. The device list is not.
         mounts = parse_mounts(read_lines("/proc/mounts"))
         swaps = parse_swaps(read_lines("/proc/swaps"))
-        by_source = {entry["source"]: entry for entry in mounts}
         for volume in self._volumes or self._find_volumes():
             volume = dict(volume)
-            volume["mount"] = by_source.get(volume["node"])
+            volume["mount"] = _mount_for(
+                volume["path"], _aliases_of(volume), mounts
+            )
             volume["swaps"] = swaps
             state = self.volume_state(volume)
             rows = [self.mount_state_row(state)]
             rows.extend(self.usage_rows(state))
             out[volume["name"]] = rows
         return out
+
+
+def _aliases_of(volume) -> set[str]:
+    """The alias set, tolerating a volume record built before they existed."""
+    aliases = volume.get("aliases")
+    return set(aliases) if aliases else {volume["node"]}
+
+
+def _mount_for(path, aliases, mounts):
+    """The ``/proc/mounts`` record for this block device, by any of its names.
+
+    Names are tried first, and the device number only for the leftovers: on a
+    machine with no device-mapper at all the names always match, and the stat
+    is never reached.
+    """
+    for entry in mounts:
+        if entry["source"] in aliases:
+            return entry
+    number = _device_number(path)
+    if number is None:
+        return None
+    for entry in mounts:
+        source = entry["source"]
+        if not source.startswith("/dev/") or source in aliases:
+            continue
+        if _stat_device_number(source) == number:
+            return entry
+    return None
 
 
 def _text(value) -> str | None:

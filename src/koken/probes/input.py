@@ -54,17 +54,34 @@ EVENT_NAMES = {
     EV_FF: "force feedback",
 }
 
+# Straight from the kernel's input.h. Getting these off by one entry is easy
+# and almost invisible: every internal keyboard and every PS/2 touchpad is
+# BUS_I8042, so a table that starts one late labels the most common input
+# hardware there is as something it is not.
 BUS_TYPES = {
     0x01: "PCI",
+    0x02: "ISA Plug and Play",
     0x03: "USB",
+    0x04: "HIL",
     0x05: "Bluetooth",
-    0x11: "ISA",
-    0x12: "i8042 (PS/2)",
-    0x13: "Infrared",
+    0x06: "Virtual",
+    0x10: "ISA",
+    0x11: "i8042 (PS/2)",
+    0x12: "XT keyboard",
+    0x13: "Serial (RS-232)",
+    0x14: "Game port",
+    0x15: "Parallel port",
+    0x16: "Amiga",
+    0x17: "ADB",
     0x18: "I2C",
     0x19: "Host",
-    0x1B: "Virtual",
-    0x06: "Virtual",
+    0x1A: "GSC",
+    0x1B: "Atari",
+    0x1C: "SPI",
+    0x1D: "RMI",
+    0x1E: "CEC",
+    0x1F: "Intel ISHTP",
+    0x20: "AMD SFH",
 }
 
 # Key codes that decide what a device is.

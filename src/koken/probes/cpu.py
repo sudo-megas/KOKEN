@@ -19,6 +19,7 @@ shared with, and on a chiplet part that grouping *is* the CCX.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 
 from .base import (
     NONE_PRESENT,
@@ -324,7 +325,16 @@ class CpuProbe(Probe):
         core_count = len(physical) if physical else 0
         thread_count = len(topology)
         smt_on = bool(core_count) and thread_count > core_count
-        per_core = (thread_count // core_count) if core_count else 0
+        # How many threads each core really carries. An average is wrong on a
+        # hybrid processor, where performance cores carry two and efficiency
+        # cores carry one: 32 threads over 24 cores averages to 1, printed as
+        # a fact directly beneath a row saying SMT is enabled.
+        per_core_counts = Counter(
+            (entry["package"], entry["core_id"])
+            for entry in topology
+            if entry["core_id"] is not None
+        )
+        threads_per_core = Counter(per_core_counts.values())
 
         section.add(
             self.row(
@@ -344,10 +354,18 @@ class CpuProbe(Probe):
                 gloss=("SMT enabled" if smt_on else "SMT disabled") if core_count else "",
             )
         )
-        if per_core:
-            section.add(
-                self.row("threads_per_core", "Threads per core", str(per_core))
-            )
+        if threads_per_core:
+            if len(threads_per_core) == 1:
+                value = str(next(iter(threads_per_core)))
+            else:
+                value = ", ".join(
+                    "{} on {} core{}".format(threads, cores, "" if cores == 1 else "s")
+                    for threads, cores in sorted(
+                        threads_per_core.items(), reverse=True
+                    )
+                )
+                value += " — a hybrid processor, with two kinds of core"
+            section.add(self.row("threads_per_core", "Threads per core", value))
 
         smt_control = read_first_line(f"{CPU_ROOT}/smt/control")
         if smt_control:
@@ -559,14 +577,23 @@ class CpuProbe(Probe):
 
         for (level, kind), members in grouped.items():
             sizes = [c["size"] for c in members if c["size"]]
+            # Only the instances whose size file could be read. Multiplying the
+            # full instance count by a partial sum prints arithmetic that does
+            # not add up - "4 x 1.00 MiB = 3.00 MiB" - so the complete case and
+            # the partial case are shown differently.
+            complete = len(sizes) == len(members)
             total = sum(sizes) if sizes else None
             each = sizes[0] if sizes and len(set(sizes)) == 1 else None
             shared_width = len(members[0]["shared"])
 
-            if each is not None and len(members) > 1:
+            if complete and each is not None and len(members) > 1:
                 value = f"{len(members)} × {fmt_bytes(each)} = {fmt_bytes(total)}"
-            elif total is not None:
+            elif complete and total is not None:
                 value = fmt_bytes(total)
+            elif total is not None:
+                value = "{} across {} of {} instances".format(
+                    fmt_bytes(total), len(sizes), len(members)
+                )
             else:
                 value = NOT_AVAILABLE
 

@@ -78,9 +78,23 @@ SECTOR_BYTES = 512
 # nvme0n1 -> controller nvme0, namespace 1.
 _NVME_NAME = re.compile(r"^(?P<controller>nvme\d+)n\d+")
 
-# What may follow a disk name to make a partition name: sda -> sda1, and
-# nvme0n1 -> nvme0n1p1. Anchored so that nvme0n1 does not claim nvme0n11.
-_PARTITION_SUFFIX = re.compile(r"^p?\d+$")
+# What may follow a disk name to make a partition name. The kernel's rule, in
+# block/partition-generic.c, is not "an optional p": a disk whose name ends in
+# a digit takes a mandatory `p` before the number, and one that does not takes
+# the bare number. Accepting `p?` for both is what lets nvme0n1 claim nvme0n11,
+# which is not its partition but the eleventh namespace of the same controller.
+_PARTITION_DIGITS = re.compile(r"^\d+$")
+_PARTITION_P_DIGITS = re.compile(r"^p\d+$")
+
+
+def _partition_of(disk_name: str, name: str) -> bool:
+    """Whether *name* is the name the kernel would give a partition of *disk_name*."""
+    if not name.startswith(disk_name) or name == disk_name:
+        return False
+    suffix = name[len(disk_name) :]
+    if disk_name and disk_name[-1].isdigit():
+        return bool(_PARTITION_P_DIGITS.match(suffix))
+    return bool(_PARTITION_DIGITS.match(suffix))
 
 
 def _partitions_of(disk_name: str) -> list:
@@ -93,10 +107,7 @@ def _partitions_of(disk_name: str) -> list:
     """
     out = []
     for path in list_dir(BLOCK_ROOT):
-        name = path.name
-        if not name.startswith(disk_name) or name == disk_name:
-            continue
-        if not _PARTITION_SUFFIX.match(name[len(disk_name) :]):
+        if not _partition_of(disk_name, path.name):
             continue
         if path_exists(path / "partition"):
             out.append(path)
@@ -403,6 +414,18 @@ def _object_path(value) -> str | None:
         return value or None
     path = getattr(value, "path", None)
     return path() if callable(path) else None
+
+
+def _smart_was_read(properties: dict) -> bool:
+    """Whether udisks2 has ever actually read this drive's SMART data.
+
+    ``SmartUpdated`` is seconds since the epoch, or 0 for never. It is 0 on any
+    machine where the daemon has not been asked - which is the ordinary case
+    for a drive nothing has touched since boot - and every other Smart* property
+    is then its type's default rather than a reading.
+    """
+    updated = properties.get("SmartUpdated")
+    return isinstance(updated, (int, float)) and updated > 0
 
 
 def _ata_attribute_rows(entries) -> list:
@@ -742,6 +765,18 @@ class DisksProbe(Probe):
                     severity=WARNING,
                 )
             )
+        elif not _smart_was_read(ata):
+            # SmartUpdated is 0 until udisks2 has actually read the drive's
+            # SMART data. SmartFailing is then a default False, and printing
+            # "OK" from it would be an assurance about a drive nobody asked.
+            rows.append(
+                self.row(
+                    "smart",
+                    "SMART health",
+                    "SMART is supported and switched on, but udisks2 has not read "
+                    "this drive's SMART data, so there is no health result to show.",
+                )
+            )
         else:
             failing = ata.get("SmartFailing")
             rows.append(
@@ -754,6 +789,12 @@ class DisksProbe(Probe):
                     severity=DANGER if failing else "normal",
                 )
             )
+
+        if not _smart_was_read(ata):
+            # Every remaining value below is a zero the daemon has never
+            # replaced. "0 reallocated sectors" reads as a measurement, so
+            # none of them are shown.
+            return rows
 
         seconds = ata.get("SmartPowerOnSeconds")
         if isinstance(seconds, (int, float)) and seconds:
@@ -800,17 +841,29 @@ class DisksProbe(Probe):
         rows = []
         warning = nvme.get("SmartCriticalWarning")
         warnings = [str(item) for item in warning] if isinstance(warning, list) else []
-        rows.append(
-            self.row(
-                "smart",
-                "SMART health",
-                "OK — the controller reports no critical warning"
-                if not warnings
-                else "Critical warning: " + ", ".join(warnings),
-                severity=DANGER if warnings else "normal",
+        if not _smart_was_read(nvme):
+            # As above: an empty warning list on a controller that was never
+            # read is silence, not a clean bill of health.
+            rows.append(
+                self.row(
+                    "smart",
+                    "SMART health",
+                    "udisks2 has not read this controller's SMART log, so there is "
+                    "no health result to show.",
+                )
             )
-        )
-        hours = nvme.get("SmartPowerOnHours")
+        else:
+            rows.append(
+                self.row(
+                    "smart",
+                    "SMART health",
+                    "OK — the controller reports no critical warning"
+                    if not warnings
+                    else "Critical warning: " + ", ".join(warnings),
+                    severity=DANGER if warnings else "normal",
+                )
+            )
+        hours = nvme.get("SmartPowerOnHours") if _smart_was_read(nvme) else None
         if isinstance(hours, (int, float)) and hours:
             rows.append(
                 self.row(
@@ -819,12 +872,19 @@ class DisksProbe(Probe):
                     f"{fmt_duration(hours * 3600)} — {int(hours):,} hours",
                 )
             )
-        rows.append(self._temperature_row(nvme.get("SmartTemperature")))
+        rows.append(
+            self._temperature_row(
+                nvme.get("SmartTemperature") if _smart_was_read(nvme) else None
+            )
+        )
 
+        # `State` is deliberately not here. The identity block above already
+        # emits a "Controller state" row read straight from sysfs, under the
+        # same field id, and two rows sharing an id inside one section collide
+        # in the volatile pass as well as reading as a duplicate on screen.
         for key, field, label in (
             ("NVMeRevision", "nvme_revision", "NVMe revision"),
             ("ControllerID", "nvme_controller_id", "Controller id"),
-            ("State", "nvme_state", "Controller state"),
         ):
             value = nvme.get(key)
             if value not in (None, ""):
@@ -923,10 +983,12 @@ class DisksProbe(Probe):
             rows = []
             if udisks.has_interface(drive_path, IFACE_NVME):
                 nvme = udisks.properties(drive_path, IFACE_NVME, refresh=True)
-                rows.append(self._temperature_row(nvme.get("SmartTemperature")))
+                if _smart_was_read(nvme):
+                    rows.append(self._temperature_row(nvme.get("SmartTemperature")))
             elif udisks.has_interface(drive_path, IFACE_ATA):
                 ata = udisks.properties(drive_path, IFACE_ATA, refresh=True)
-                rows.append(self._temperature_row(ata.get("SmartTemperature")))
+                if _smart_was_read(ata):
+                    rows.append(self._temperature_row(ata.get("SmartTemperature")))
             if rows:
                 out[disk["name"]] = rows
         return out
