@@ -71,8 +71,19 @@ jobs:
 
       # From inside packaging/, because that is where the PKGBUILD lives and
       # makepkg takes $startdir from the directory it is run in.
+      #
+      # --nodeps, and not -s, because none of the runtime dependencies are
+      # needed to build this package. It is arch=('any'): build() produces a
+      # wheel and package() copies files, and neither imports PySide6 or speaks
+      # to udisks2, dmidecode or polkit. `-s` would download several hundred
+      # megabytes of Qt into a container that then throws it away.
+      #
+      # This skips the dependency *check*, not the dependency *declaration* -
+      # depends= is written into .PKGINFO either way, so a wrong name here
+      # still fails, at `pacman -U` on somebody's machine instead of in CI.
+      # The makedepends are installed by the step above.
       - name: Build
-        run: sudo -u builder makepkg -s --noconfirm
+        run: sudo -u builder makepkg --noconfirm --nodeps
         working-directory: packaging
 
       - name: Show what was built
