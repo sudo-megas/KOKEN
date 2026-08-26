@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import platform
-import socket
 from pathlib import Path
 
 from .. import MAKER, RELEASE_DATE, SOURCE, SPDX, SUBTITLE, VERSION
@@ -334,12 +333,19 @@ class SystemProbe(Probe):
 
 
 def _hostname() -> str:
+    """The machine's name, from the kernel and never from a resolver.
+
+    os.uname() is a plain syscall. socket.gethostname() would answer the same
+    question, but importing the socket module at all is the one thing in this
+    package a reader would have to stop and check, and there is no reason to
+    make them.
+    """
     name = read_first_line("/proc/sys/kernel/hostname")
     if name:
         return name
     try:
-        return socket.gethostname() or NOT_AVAILABLE
-    except OSError:
+        return os.uname().nodename or NOT_AVAILABLE
+    except (OSError, AttributeError):
         return NOT_AVAILABLE
 
 

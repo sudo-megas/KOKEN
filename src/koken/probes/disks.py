@@ -426,6 +426,12 @@ def _ata_attribute_rows(entries) -> list:
 # same object graph, and asking the bus twice for it would double the work for
 # no benefit. invalidate() is called before each full enumeration.
 _client: Udisks2 | None = None
+# Set when a client was installed by hand rather than built from the bus. A
+# pinned client survives invalidate(), because otherwise the first
+# re-enumeration would throw away the captured data and fall straight back to
+# "no system bus" - which would make the seam useless for exactly the thing it
+# exists for.
+_pinned = False
 
 
 def client() -> Udisks2:
@@ -436,15 +442,22 @@ def client() -> Udisks2:
 
 
 def invalidate() -> None:
-    """Drop the cached client, so the next enumeration asks the bus again."""
+    """Drop the cached client, so the next enumeration asks the bus again.
+
+    Hardware can appear and disappear between enumerations, so the snapshot is
+    rebuilt rather than reused. A pinned client is left alone.
+    """
     global _client
+    if _pinned:
+        return
     _client = None
 
 
 def set_client(replacement: Udisks2 | None) -> None:
     """Install a client built from captured data. Used for testing only."""
-    global _client
+    global _client, _pinned
     _client = replacement
+    _pinned = replacement is not None
 
 
 # ==========================================================================
