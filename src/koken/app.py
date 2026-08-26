@@ -42,12 +42,21 @@ class Application(QObject):
 
     def __init__(self, argv: list[str] | None = None) -> None:
         super().__init__()
+        # Identity first, before QApplication exists. These are static, and the
+        # platform plugin reads them while it is constructing: on Wayland it
+        # registers the application id with the desktop portal at that moment.
+        # Setting the desktop file name afterwards makes it try to register a
+        # second time on a connection that already has an id, which the portal
+        # refuses - "Could not register app ID: Connection already associated
+        # with an application ID", printed to the terminal at every launch.
+        QApplication.setApplicationName(APPLICATION_NAME)
+        QApplication.setApplicationDisplayName("KÖKEN")
+        QApplication.setDesktopFileName(DESKTOP_FILE)
+
         self.qt = QApplication(argv if argv is not None else sys.argv)
         # Before the first widget. CORE 13.1.
         self.qt.setStyle("Fusion")
-        self.qt.setApplicationName(APPLICATION_NAME)
-        self.qt.setApplicationDisplayName("KÖKEN")
-        self.qt.setDesktopFileName(DESKTOP_FILE)
+        # After construction: icon theme lookup needs a live QGuiApplication.
         self.qt.setWindowIcon(QIcon.fromTheme(APPLICATION_NAME))
 
         self.settings = config.Settings()
