@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+
+<!--
+  KOKEN - Machine Corpus
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  One action, for one short-lived helper that reads three things and prints
+  JSON. auth_admin_keep so that a second run inside the same session does not
+  ask again. No vendor_url: KOKEN follows no links and offers none.
+-->
+
+<policyconfig>
+
+  <vendor>KÖKEN</vendor>
+  <icon_name>koken</icon_name>
+
+  <action id="com.github.sudo_megas.koken.read-hardware">
+    <description>Read hardware details that need administrator access</description>
+    <message>Authentication is required to read memory module details, firmware versions and serial numbers</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/koken/koken-helper</annotate>
+  </action>
+
+</policyconfig>
