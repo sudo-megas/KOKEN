@@ -150,7 +150,14 @@ per device, and therefore vary per machine. All others are fixed.
 |---|---|
 | Disks | *(instances — one per physical block device)* |
 | Volumes | *(instances — one per partition)* |
+| SMART | *(instances — one per drive with SMART data)* |
 | Filesystems | Mounts · Swap |
+
+`Disks` keeps the headline SMART rows — the health verdict, temperature,
+power-on hours, reallocated sectors — because somebody looking at a drive
+should see at a glance whether it is failing. `SMART` carries the full
+per-attribute table, which is long enough to bury everything else in the
+section it would otherwise sit in.
 
 ### 6.4 Peripherals
 
