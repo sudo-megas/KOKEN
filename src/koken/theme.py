@@ -689,20 +689,53 @@ class _PortalWatcher(QObject):
             return
 
 
+def describe_colour_scheme() -> tuple[str, str]:
+    """The variant, and a sentence saying where it came from.
+
+    The second half exists because of a real report: a shell was switched to
+    light and KOKEN stayed dark, and there was no way from inside the
+    application to tell whether the portal had been asked and said dark, or had
+    never been asked at all. Those are different problems with different fixes,
+    and the interface said the same thing for both - nothing.
+    """
+    if _last_read["reason"] is None:
+        read_colour_scheme()
+    return _last_read["variant"], _last_read["reason"] or ""
+
+
+# Filled in by every read, so the Desktop section can report the answer rather
+# than only its consequence.
+_last_read: dict[str, str | None] = {"variant": DEFAULT_VARIANT, "reason": None}
+
+
 def read_colour_scheme() -> str:
     """``light`` or ``dark``, from the portal. Dark when it cannot be asked."""
     try:
         from PySide6.QtDBus import QDBusConnection, QDBusInterface
     except ImportError:
-        return DEFAULT_VARIANT
+        return _record(
+            DEFAULT_VARIANT,
+            "This build of PySide6 has no QtDBus module, so the desktop portal "
+            "cannot be asked and the dark palette is in use.",
+        )
 
     try:
         bus = QDBusConnection.sessionBus()
         if not bus.isConnected():
-            return DEFAULT_VARIANT
+            return _record(
+                DEFAULT_VARIANT,
+                "There is no session bus, so the desktop portal cannot be asked and "
+                "the dark palette is in use.",
+            )
         interface = QDBusInterface(PORTAL_SERVICE, PORTAL_PATH, PORTAL_INTERFACE, bus)
         if not interface.isValid():
-            return DEFAULT_VARIANT
+            return _record(
+                DEFAULT_VARIANT,
+                "The desktop portal is not answering on the session bus, so the "
+                "colour scheme could not be asked for and the dark palette is in "
+                "use. Installing a portal backend for this desktop would let it "
+                "follow the system setting.",
+            )
         # ReadOne is the current call; Read is the older one and is still what
         # some portal builds answer.
         for method in ("ReadOne", "Read"):
@@ -715,13 +748,37 @@ def read_colour_scheme() -> str:
                 continue
             if isinstance(value, int):
                 if value == SCHEME_DARK:
-                    return "dark"
+                    return _record("dark", "The desktop portal reports a preference for dark.")
                 if value == SCHEME_LIGHT:
-                    return "light"
-                return DEFAULT_VARIANT
+                    return _record("light", "The desktop portal reports a preference for light.")
+                # 0 is "no preference", which the portal defines as a real
+                # answer rather than an absent one. It is the value a shell
+                # leaves in place when it never sets the key at all.
+                return _record(
+                    DEFAULT_VARIANT,
+                    "The desktop portal answers 'no preference' for "
+                    "org.freedesktop.appearance color-scheme, so the dark palette is "
+                    "in use. A shell that has a light mode but does not publish this "
+                    "setting looks exactly like this: switching the shell will not "
+                    "move KOKEN until the setting is published.",
+                )
     except Exception:
-        return DEFAULT_VARIANT
-    return DEFAULT_VARIANT
+        return _record(
+            DEFAULT_VARIANT,
+            "Reading the colour scheme from the desktop portal failed, so the dark "
+            "palette is in use.",
+        )
+    return _record(
+        DEFAULT_VARIANT,
+        "The desktop portal is present but did not answer for "
+        "org.freedesktop.appearance color-scheme, so the dark palette is in use.",
+    )
+
+
+def _record(variant: str, reason: str) -> str:
+    _last_read["variant"] = variant
+    _last_read["reason"] = reason
+    return variant
 
 
 def _unwrap_variant(value, depth: int = 0):

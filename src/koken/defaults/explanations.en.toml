@@ -658,6 +658,28 @@ something behaves oddly in ways that seem to be about the display rather than
 about itself, this row is the first thing to check.
 """
 
+[system.desktop.colour_scheme]
+long = """
+Which palette KOKEN is using, and why.
+
+There is deliberately no theme picker here. KOKEN reads
+`org.freedesktop.appearance color-scheme` from the desktop portal and follows
+it, so that one setting governs every application on the machine instead of each
+one growing its own switch. Change the system setting and this follows within
+the second, without a restart.
+
+That works only when something publishes the setting. A shell can have a
+perfectly good light mode and still never write this key, and from here that is
+indistinguishable from a shell set to dark - which is why this row says which of
+the two happened rather than only showing the result. If it reports "no
+preference", the palette will not move no matter what the shell is switched to,
+and the fix belongs in the desktop: a portal backend that publishes the setting,
+or the shell doing it itself.
+
+Palettes are files. Anything that can write a TOML file into the palettes
+directory can theme this application, whether or not it speaks to the portal.
+"""
+
 [system.desktop.portal]
 long = """
 xdg-desktop-portal is the service desktop applications ask for things they

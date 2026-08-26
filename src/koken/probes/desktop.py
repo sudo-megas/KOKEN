@@ -63,6 +63,16 @@ def _env(name: str) -> str | None:
     return value.strip() if value and value.strip() else None
 
 
+def _colour_scheme_reading() -> tuple[str, str]:
+    """Ask the theme layer what the portal said. Never raises."""
+    try:
+        from ..theme import describe_colour_scheme
+
+        return describe_colour_scheme()
+    except Exception:
+        return "dark", ""
+
+
 class DesktopProbe(Probe):
     branch = "system"
     id = "desktop"
@@ -151,6 +161,20 @@ class DesktopProbe(Probe):
 
         portal = _portal_state()
         section.add(self.row("portal", "Desktop portal", portal))
+
+        # What the portal answered for the appearance setting, not merely
+        # whether a portal exists. A shell switched to light while KOKEN stays
+        # dark is either a portal that says dark or a portal that was never
+        # asked, and those need different fixes.
+        variant, reason = _colour_scheme_reading()
+        section.add(
+            self.row(
+                "colour_scheme",
+                "Colour scheme",
+                {"light": "Light", "dark": "Dark"}.get(variant, variant),
+                body=reason,
+            )
+        )
 
         section.add(
             self.row(
