@@ -139,7 +139,7 @@ per device, and therefore vary per machine. All others are fixed.
 
 | Row 2 | Row 3 |
 |---|---|
-| Operating system | Overview · Distribution · Init |
+| Operating system | Overview · Distribution · Init · Packages |
 | Kernel | Overview · Command line · Modules |
 | Desktop | Overview · Session · Toolkits |
 | Security | Overview |
