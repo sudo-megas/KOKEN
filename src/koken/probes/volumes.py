@@ -311,7 +311,7 @@ class VolumesProbe(Probe):
         block_path = udisks.block_for_device(node)
         if block_path is None:
             return False
-        return bool(udisks.properties(block_path, IFACE_FILESYSTEM))
+        return udisks.has_interface(block_path, IFACE_FILESYSTEM)
 
     def sections(self) -> list[Section]:
         volumes = self._find_volumes()
@@ -461,15 +461,27 @@ class VolumesProbe(Probe):
                 state["fstype"] = _text(block.get("IdType")) or state["fstype"]
                 state["label"] = _text(block.get("IdLabel"))
                 state["uuid"] = _text(block.get("IdUUID"))
-                if udisks.properties(block_path, IFACE_SWAP):
+                if udisks.has_interface(block_path, IFACE_SWAP):
                     state["is_swap"] = True
-                filesystem = udisks.properties(block_path, IFACE_FILESYSTEM)
-                if filesystem:
+                if udisks.has_interface(block_path, IFACE_FILESYSTEM):
+                    # The interface being there is the whole of what makes a
+                    # volume mountable, and it is there for a filesystem that
+                    # is not mounted - which is exactly the case a device node
+                    # and /proc/mounts between them cannot see at all.
                     state["actionable"] = True
+                    filesystem = udisks.properties(block_path, IFACE_FILESYSTEM)
                     points = _decode_byte_array_list(filesystem.get("MountPoints"))
                     if points:
                         state["state"] = STATE_MOUNTED
                         state["mount_point"] = points[0]
+                    elif mount is not None:
+                        # udisks2 writes MountPoints as an aay, which this Qt
+                        # binding hands back as an opaque container, so on a
+                        # live bus the list above is empty whatever the truth
+                        # is. /proc/mounts is the kernel's own answer to the
+                        # same question and is what udisks2 reads it from.
+                        state["state"] = STATE_MOUNTED
+                        state["mount_point"] = mount["target"]
                     else:
                         state["state"] = STATE_UNMOUNTED
 

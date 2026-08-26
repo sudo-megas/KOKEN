@@ -21,11 +21,27 @@ system bus, or a bus that answers with an error. Every one of those cases lands
 in the same place a missing sysfs file lands - a value of None and a row that
 says so - with no traceback and nothing on the console.
 
-Enumeration goes through Introspect and then per-interface ``GetAll`` calls,
-rather than one ObjectManager call returning the whole nested graph. That is
-more round trips, but each reply is a flat ``a{sv}`` that demarshals to an
-ordinary dictionary, where the nested form arrives as a container this binding
-cannot reliably unpack. Both happen only on enumeration, never on the timer.
+Enumeration is shaped entirely by one property of this Qt binding: it can only
+hand back D-Bus values that Qt maps to an ordinary type. Anything Qt maps to
+``QDBusArgument`` - every dictionary, every array of arrays, every array of
+structures - arrives as an opaque object whose contents PySide6 cannot read at
+all, and whose extraction operators abort the process on a type mismatch. That
+rules out all three of the obvious routes: ``GetManagedObjects`` (``a{oa{sa{sv}}}``),
+``Manager.GetBlockDevices`` (``ao``), and ``Properties.GetAll`` (``a{sv}``).
+
+What is left, and what this file uses, is:
+
+* ``Introspectable.Introspect``, which returns ``s`` - a string - and gives both
+  the child objects of a path and the interfaces and property names of an
+  object. This is the enumeration.
+* ``Properties.Get``, which returns ``v`` and unwraps correctly for every basic
+  type and for ``ay``. This is one round trip per property, so only the
+  properties this application actually shows are asked for.
+
+Both happen on enumeration, and the volatile pass asks for one property per
+drive. Properties whose type this binding cannot demarshal are never requested,
+which is also what keeps Qt from writing "must be registered with Qt D-Bus"
+onto the console.
 """
 
 from __future__ import annotations
@@ -68,8 +84,70 @@ IFACE_BLOCK = "org.freedesktop.UDisks2.Block"
 IFACE_FILESYSTEM = "org.freedesktop.UDisks2.Filesystem"
 IFACE_PARTITION = "org.freedesktop.UDisks2.Partition"
 IFACE_SWAP = "org.freedesktop.UDisks2.Swapspace"
+IFACE_PARTITION_TABLE = "org.freedesktop.UDisks2.PartitionTable"
 IFACE_PROPERTIES = "org.freedesktop.DBus.Properties"
 IFACE_INTROSPECTABLE = "org.freedesktop.DBus.Introspectable"
+
+# A blocking read is capped well below libdbus's 25 second default. udisks2
+# answers property reads out of its own cache in well under a millisecond, so
+# anything approaching this is a daemon that has stopped answering, and waiting
+# out the default there would freeze the interface for half a minute.
+READ_TIMEOUT_MS = 5000
+
+# The D-Bus null object path. udisks2 writes it into Drive, MDRaid,
+# CryptoBackingDevice and Table to mean "there is no such object", and reading
+# it back as a path would send later lookups to an object that does not exist.
+NULL_OBJECT_PATH = "/"
+
+# Type codes this binding demarshals into something ordinary Python can read.
+# Everything absent from here - a{sv}, aay, ao, a(sa{sv}) - arrives as an
+# opaque QDBusArgument, so those properties are never asked for.
+_READABLE_SIGNATURES = frozenset(
+    ("y", "b", "n", "q", "i", "u", "x", "t", "d", "s", "o", "g", "ay", "as")
+)
+
+# The two properties that say which device node a block object is.
+_DEVICE_KEYS = ("Device", "PreferredDevice")
+
+# The properties each interface is asked for, which is exactly the set this
+# application displays. Anything added to a row here has to be added to this
+# map as well, because a property that is not listed is never fetched.
+WANTED_PROPERTIES = {
+    IFACE_BLOCK: _DEVICE_KEYS + ("Drive", "IdType", "IdLabel", "IdUUID"),
+    IFACE_PARTITION: ("Name", "Type", "UUID", "Offset", "Flags"),
+    IFACE_PARTITION_TABLE: ("Type",),
+    IFACE_FILESYSTEM: (),
+    IFACE_SWAP: (),
+    IFACE_DRIVE: ("Model", "Serial", "Size"),
+    IFACE_ATA: (
+        "SmartSupported",
+        "SmartEnabled",
+        "SmartUpdated",
+        "SmartFailing",
+        "SmartPowerOnSeconds",
+        "SmartTemperature",
+        "SmartNumBadSectors",
+        "SmartNumAttributesFailing",
+        "SmartNumAttributesFailedInThePast",
+        "SmartSelftestStatus",
+    ),
+    IFACE_NVME: (
+        "SmartUpdated",
+        "SmartCriticalWarning",
+        "SmartPowerOnHours",
+        "SmartTemperature",
+        "NVMeRevision",
+        "ControllerID",
+        "UnallocatedCapacity",
+    ),
+}
+
+# The one property the volatile pass re-reads, per interface. The timer must
+# not cost a round trip for every property of every drive.
+VOLATILE_PROPERTIES = {
+    IFACE_ATA: ("SmartUpdated", "SmartTemperature"),
+    IFACE_NVME: ("SmartUpdated", "SmartTemperature"),
+}
 
 # Sectors are 512 bytes in /sys/class/block/*/size regardless of the drive's
 # real block size. This trips people up often enough to be worth naming.
@@ -127,50 +205,118 @@ class Udisks2:
     fit to put on screen.
     """
 
-    def __init__(self, available: bool = False, reason: str = "") -> None:
+    def __init__(
+        self, available: bool = False, reason: str = "", detail: str = ""
+    ) -> None:
         self.available = available
         self.reason = reason
+        # The raw D-Bus error behind `reason`, when there was one. Kept apart
+        # from it because a row value is one line that elides, and an error
+        # name is the part somebody reporting a fault needs to be able to
+        # read: it goes in the row's expansion, where there is room for it.
+        self.detail = detail
         self._bus = None
         self._properties: dict[tuple[str, str], dict] = {}
         self._drive_paths: list[str] = []
         self._block_paths: list[str] = []
+        # path -> (child names, {interface: {property: signature}}), from one
+        # Introspect call per object. This is the whole object graph: which
+        # objects exist, what each of them implements, and what may be read
+        # from it.
+        self._nodes: dict[str, tuple] = {}
+        # The name and message of the last D-Bus error, so a failure can say
+        # what actually went wrong instead of guessing.
+        self._last_error: tuple[str, str] = ("", "")
 
     # -- construction -----------------------------------------------------
 
     @classmethod
-    def unavailable(cls, reason: str) -> "Udisks2":
-        return cls(available=False, reason=reason)
+    def unavailable(cls, reason: str, detail: str = "") -> "Udisks2":
+        return cls(available=False, reason=reason, detail=detail)
+
+    @property
+    def full_reason(self) -> str:
+        """Reason and detail as one paragraph, for somewhere that wraps."""
+        return f"{self.reason} {self.detail}".strip()
 
     @classmethod
-    def connect(cls) -> "Udisks2":
-        try:
-            from PySide6.QtDBus import QDBusConnection
-        except ImportError:
-            return cls.unavailable(
-                "This build of PySide6 has no QtDBus module, so udisks2 cannot be "
-                "reached. SMART data and the mount controls are unavailable."
-            )
+    def connect(cls, bus=None) -> "Udisks2":
+        """Build a client from the bus, or say in one sentence why not.
 
-        bus = QDBusConnection.systemBus()
-        if not bus.isConnected():
-            return cls.unavailable(
-                "There is no connection to the system message bus, so udisks2 "
-                "cannot be reached. SMART data and the mount controls are unavailable."
-            )
+        A client is only ever returned as available with a populated object
+        graph. An empty graph used to be returned as available, and the result
+        was three different rows each blaming something else: a drive with no
+        SMART record, a partition with no filesystem, and a mount control that
+        said udisks2 was missing - all for the one cause, and none of them
+        saying it.
+
+        *bus* is the system bus unless one is handed in, which is how this can
+        be exercised against a service on a session bus.
+        """
+        if bus is None:
+            try:
+                from PySide6.QtDBus import QDBusConnection
+            except ImportError:
+                return cls.unavailable(
+                    "This build of PySide6 has no QtDBus module, so udisks2 cannot be "
+                    "reached. SMART data and the mount controls are unavailable."
+                )
+
+            bus = QDBusConnection.systemBus()
+            if not bus.isConnected():
+                return cls.unavailable(
+                    "There is no connection to the system message bus, so udisks2 "
+                    "cannot be reached. SMART data and the mount controls are "
+                    "unavailable."
+                )
 
         client = cls(available=True)
         client._bus = bus
+        block_paths = client._children(BLOCK_PATH)
+        if not block_paths:
+            return cls.unavailable(*client._enumeration_failure())
+        client._block_paths = block_paths
+        # A machine can have block devices and no drives - every one of them
+        # loop, device-mapper or a virtio disk udisks2 gives no drive record.
+        # That is not a failure, and it is not a reason to throw away the block
+        # objects the mount controls need.
         client._drive_paths = client._children(DRIVES_PATH)
-        client._block_paths = client._children(BLOCK_PATH)
-        if not client._drive_paths and not client._block_paths:
-            probe = client._get_all(ROOT_PATH, "org.freedesktop.UDisks2.Manager")
-            if probe is None:
-                return cls.unavailable(
-                    "udisks2 is not answering on the system bus. It is probably not "
-                    "installed or not running. SMART data and the mount controls "
-                    "are unavailable."
-                )
         return client
+
+    def _enumeration_failure(self) -> tuple[str, str]:
+        """Why the object graph came back empty: a sentence, and the raw error."""
+        name, message = self._last_error
+        tail = "SMART data and the mount controls are unavailable."
+        if not name:
+            return (
+                "udisks2 answered on the system bus but lists no block devices at "
+                f"all, so there is nothing to match this machine's disks against. "
+                f"{tail}",
+                f"{BLOCK_PATH} has no objects under it, which on a machine with "
+                "disks in it means the daemon has not finished starting or has "
+                "lost its view of them.",
+            )
+        detail = (
+            f"The system bus answered the request to list {BLOCK_PATH} with "
+            f"{name}" + (f": {message}" if message else ".")
+        )
+        if name.endswith(("ServiceUnknown", "NameHasNoOwner")):
+            return (
+                f"udisks2 is not running: nothing on the system bus owns {SERVICE}. "
+                f"It is probably not installed, or its service is stopped. {tail}",
+                detail,
+            )
+        if name.endswith(("NoReply", "Timeout", "TimedOut")):
+            return (
+                f"udisks2 did not answer within {READ_TIMEOUT_MS // 1000} seconds, "
+                f"so its list of block devices could not be read. {tail}",
+                detail,
+            )
+        return (
+            f"udisks2 would not list its block devices, so none of this machine's "
+            f"disks could be matched to one. {tail}",
+            detail,
+        )
 
     @classmethod
     def from_snapshot(
@@ -192,61 +338,130 @@ class Udisks2:
 
     # -- raw calls --------------------------------------------------------
 
-    def _interface(self, path: str, interface: str):
+    def _call(self, path: str, interface: str, method: str, arguments=()):
+        """One blocking call. The reply message, or None with the error kept.
+
+        Built as a plain message rather than through ``QDBusInterface``, which
+        introspects the object again on construction to build a metaobject this
+        code never uses, and which writes a warning to the console when a
+        property's type has no Qt equivalent.
+        """
         if self._bus is None:
             return None
         try:
-            from PySide6.QtDBus import QDBusInterface
+            from PySide6.QtDBus import QDBus, QDBusMessage
 
-            handle = QDBusInterface(SERVICE, path, interface, self._bus)
-        except Exception:
+            message = QDBusMessage.createMethodCall(SERVICE, path, interface, method)
+            if arguments:
+                message.setArguments(list(arguments))
+            reply = self._bus.call(message, QDBus.CallMode.Block, READ_TIMEOUT_MS)
+        except Exception as error:  # a binding fault must not reach the screen
+            self._last_error = (type(error).__name__, str(error))
             return None
-        return handle if handle.isValid() else None
+        if reply.type() == QDBusMessage.MessageType.ErrorMessage:
+            self._last_error = (reply.errorName() or "", reply.errorMessage() or "")
+            return None
+        return reply
+
+    def _introspect(self, path: str) -> tuple:
+        """``(child names, {interface: {property: signature}})`` for one object.
+
+        One round trip, cached, and the only thing that establishes what an
+        object is: udisks2 puts Block, Partition, Filesystem and Swapspace on
+        the same object, and this is what says which of them are there.
+        """
+        cached = self._nodes.get(path)
+        if cached is not None:
+            return cached
+        reply = self._call(path, IFACE_INTROSPECTABLE, "Introspect")
+        parsed: tuple = ([], {})
+        if reply is not None:
+            arguments = reply.arguments()
+            if arguments and isinstance(arguments[0], str):
+                parsed = _parse_introspection(arguments[0])
+        self._nodes[path] = parsed
+        return parsed
 
     def _children(self, path: str) -> list[str]:
         """Object paths one level under *path*, via Introspect."""
-        handle = self._interface(path, IFACE_INTROSPECTABLE)
-        if handle is None:
-            return []
-        try:
-            message = handle.call("Introspect")
-            arguments = message.arguments()
-        except Exception:
-            return []
-        if not arguments or not isinstance(arguments[0], str):
-            return []
-        return [f"{path}/{name}" for name in _introspect_nodes(arguments[0])]
+        return [f"{path}/{name}" for name in self._introspect(path)[0]]
 
-    def _get_all(self, path: str, interface: str) -> dict | None:
-        """``org.freedesktop.DBus.Properties.GetAll``, or None."""
-        handle = self._interface(path, IFACE_PROPERTIES)
-        if handle is None:
+    def _get(self, path: str, interface: str, name: str):
+        """``org.freedesktop.DBus.Properties.Get``, unwrapped, or None."""
+        reply = self._call(path, IFACE_PROPERTIES, "Get", (interface, name))
+        if reply is None:
             return None
-        try:
-            message = handle.call("GetAll", interface)
-            arguments = message.arguments()
-        except Exception:
+        arguments = reply.arguments()
+        return _unwrap(arguments[0]) if arguments else None
+
+    def _fetch(self, path: str, interface: str, names=None) -> dict | None:
+        """Read *names* of *interface*, one property per round trip.
+
+        None means the object does not carry the interface at all, which is a
+        different thing from carrying it with nothing readable on it: a
+        Filesystem interface has only ``MountPoints`` and ``Size`` on it, and
+        the first of those is an ``aay`` this binding cannot demarshal.
+        """
+        declared = self._introspect(path)[1].get(interface)
+        if declared is None:
             return None
-        if not arguments or not isinstance(arguments[0], dict):
-            return None
-        return {str(key): _unwrap(value) for key, value in arguments[0].items()}
+        if names is None:
+            names = WANTED_PROPERTIES.get(interface, tuple(declared))
+        out = {}
+        for name in names:
+            signature = declared.get(name)
+            if signature is None and declared:
+                # This object declares the interface's properties, and this is
+                # not one of them: an older udisks2 than the one this was
+                # written against. Asking anyway would only earn an error.
+                continue
+            if signature is not None and signature not in _READABLE_SIGNATURES:
+                continue
+            # With no declaration to go on the property is asked for blind, and
+            # an answer that comes back as an unreadable container is dropped
+            # the same way a declared one would have been skipped.
+            value = self._get(path, interface, name)
+            if value is not None and not _is_opaque(value):
+                out[name] = value
+        return out
 
     def properties(self, path: str, interface: str, refresh: bool = False) -> dict:
         """Cached properties of one interface on one object. Empty when absent.
 
-        The cache is what keeps enumeration to one round trip per interface.
-        The volatile pass passes ``refresh`` so that a temperature read on the
-        timer is a fresh one rather than the value from launch.
+        The cache is what keeps enumeration to one pass over the properties
+        this application shows. The volatile pass passes ``refresh`` so that a
+        temperature read on the timer is a fresh one rather than the value from
+        launch, and re-reads only the properties that can have changed.
         """
         key = (path, interface)
-        if refresh or key not in self._properties:
-            fetched = self._get_all(path, interface)
-            if fetched is None and key in self._properties:
-                return self._properties[key]
-            self._properties[key] = fetched or {}
+        if not refresh and key in self._properties:
+            return self._properties[key]
+        fetched = self._fetch(
+            path, interface, VOLATILE_PROPERTIES.get(interface) if refresh else None
+        )
+        known = self._properties.get(key)
+        if fetched is None:
+            # The object does not carry the interface. A previous answer, if
+            # there is one, is better than replacing it with nothing.
+            self._properties[key] = known if known is not None else {}
+        elif known:
+            # A refresh reads a subset, so it updates what is held rather than
+            # replacing it and dropping every value it did not ask for.
+            self._properties[key] = {**known, **fetched}
+        else:
+            self._properties[key] = fetched
         return self._properties[key]
 
     def has_interface(self, path: str, interface: str) -> bool:
+        """Whether the object at *path* carries *interface*.
+
+        Introspection is the authority where there is a bus, because an
+        interface can be present with nothing on it this binding can read. A
+        client built from a snapshot has no introspection data and falls back
+        to the captured properties.
+        """
+        if self._bus is not None:
+            return interface in self._introspect(path)[1]
         return bool(self.properties(path, interface))
 
     # -- the object graph -------------------------------------------------
@@ -266,10 +481,11 @@ class Udisks2:
         than by guessing the object path from the name: udisks2 escapes names
         in a way that is easy to get subtly wrong, and a wrong path here would
         act on the wrong device.
+
         """
         for path in self._block_paths:
             block = self.properties(path, IFACE_BLOCK)
-            for key in ("Device", "PreferredDevice"):
+            for key in _DEVICE_KEYS:
                 if _decode_bytes(block.get(key)) == device:
                     return path
         return None
@@ -294,14 +510,8 @@ class Udisks2:
         if not self.available:
             return [], ""
         if self.has_interface(drive_path, IFACE_NVME):
-            handle = self._interface(drive_path, IFACE_NVME)
-            if handle is None:
-                return [], ""
-            try:
-                message = handle.call("SmartGetAttributes", {})
-                arguments = message.arguments()
-            except Exception:
-                return [], ""
+            reply = self._call(drive_path, IFACE_NVME, "SmartGetAttributes", ({},))
+            arguments = reply.arguments() if reply is not None else []
             if arguments and isinstance(arguments[0], dict):
                 return sorted(
                     (str(key), _unwrap(value)) for key, value in arguments[0].items()
@@ -309,14 +519,8 @@ class Udisks2:
             return [], ""
 
         if self.has_interface(drive_path, IFACE_ATA):
-            handle = self._interface(drive_path, IFACE_ATA)
-            if handle is None:
-                return [], ""
-            try:
-                message = handle.call("SmartGetAttributes", {})
-                arguments = message.arguments()
-            except Exception:
-                return [], ""
+            reply = self._call(drive_path, IFACE_ATA, "SmartGetAttributes", ({},))
+            arguments = reply.arguments() if reply is not None else []
             if arguments and isinstance(arguments[0], list):
                 return _ata_attribute_rows(arguments[0]), ""
             return (
@@ -331,25 +535,64 @@ class Udisks2:
 # -- demarshalling helpers -------------------------------------------------
 
 
-def _introspect_nodes(xml: str) -> list[str]:
-    """Child node names from an Introspect reply."""
+def _parse_introspection(xml: str) -> tuple:
+    """An Introspect reply into ``(child names, {interface: {property: type}})``.
+
+    Both halves come out of the one document because both are needed and the
+    reply carries both. A container path such as ``/org/freedesktop/UDisks2/
+    block_devices`` is not an object at all - the daemon answers for it with a
+    bare list of children and no interfaces whatsoever - so an empty interface
+    map is an ordinary result and not a failure.
+    """
     try:
         from xml.dom import minidom
 
         document = minidom.parseString(xml)
     except Exception:
-        return []
-    names = []
+        return [], {}
     root = document.documentElement
     if root is None:
-        return []
+        return [], {}
+
+    names = []
+    interfaces: dict[str, dict[str, str]] = {}
     for node in root.childNodes:
-        if getattr(node, "tagName", None) != "node":
-            continue
-        name = node.getAttribute("name")
-        if name:
-            names.append(name)
-    return names
+        tag = getattr(node, "tagName", None)
+        if tag == "node":
+            name = node.getAttribute("name")
+            if name:
+                names.append(name)
+        elif tag == "interface":
+            name = node.getAttribute("name")
+            if not name:
+                continue
+            declared: dict[str, str] = {}
+            for child in node.childNodes:
+                if getattr(child, "tagName", None) != "property":
+                    continue
+                if "read" not in (child.getAttribute("access") or "read"):
+                    continue
+                property_name = child.getAttribute("name")
+                if property_name:
+                    declared[property_name] = child.getAttribute("type")
+            interfaces[name] = declared
+    return names, interfaces
+
+
+
+def _is_opaque(value) -> bool:
+    """Whether this is a container the binding hands back without its contents.
+
+    A ``QDBusArgument`` is what arrives for every D-Bus type Qt has no ordinary
+    equivalent for. There is no way to read one from Python - its extraction
+    operators are bound in a form that returns nothing, and handing one the
+    wrong type aborts the process - so one that reaches here is dropped.
+    """
+    try:
+        from PySide6.QtDBus import QDBusArgument
+    except ImportError:
+        return False
+    return isinstance(value, QDBusArgument)
 
 
 def _unwrap(value):
@@ -408,12 +651,21 @@ def _decode_byte_array_list(value) -> list[str]:
 
 
 def _object_path(value) -> str | None:
+    """An object path property as a string, with the null path read as None.
+
+    udisks2 writes ``/`` into Drive, MDRaid and CryptoBackingDevice to mean
+    there is no such object. It is a valid path and a truthy string, so taking
+    it at face value would send every later lookup to an object that does not
+    exist and get an empty answer back with nothing saying why.
+    """
     if value is None:
         return None
-    if isinstance(value, str):
-        return value or None
-    path = getattr(value, "path", None)
-    return path() if callable(path) else None
+    if not isinstance(value, str):
+        path = getattr(value, "path", None)
+        value = path() if callable(path) else None
+    if not value or value == NULL_OBJECT_PATH:
+        return None
+    return value
 
 
 def _smart_was_read(properties: dict) -> bool:
@@ -716,16 +968,37 @@ class DisksProbe(Probe):
     def _smart_rows(self, disk) -> list:
         udisks = client()
         if not udisks.available:
-            return [self.row("smart", "SMART health", udisks.reason)]
+            return [
+                self.row("smart", "SMART health", udisks.reason, body=udisks.detail)
+            ]
 
-        drive_path = self._drive_path(disk)
+        # Told apart deliberately. "udisks2 has never heard of this device" and
+        # "udisks2 knows the device but ties no drive to it" have different
+        # causes and different answers, and one sentence covering both sent the
+        # reporter of this looking for a fault in their disk.
+        block_path = udisks.block_for_device(disk["node"])
+        if block_path is None:
+            return [
+                self.row(
+                    "smart",
+                    "SMART health",
+                    "udisks2 is running, but none of the "
+                    f"{len(udisks.block_paths)} block devices it lists is "
+                    f"{disk['node']}, so no SMART data is available for it.",
+                )
+            ]
+        drive_path = _object_path(
+            udisks.properties(block_path, IFACE_BLOCK).get("Drive")
+        )
         if drive_path is None:
             return [
                 self.row(
                     "smart",
                     "SMART health",
-                    "udisks2 does not have a drive record for this device, so no "
-                    "SMART data is available for it.",
+                    f"udisks2 lists {disk['node']} but ties no physical drive to "
+                    "it, which is what it does for loop, device-mapper and some "
+                    "virtual disks. SMART is a property of the drive, so there is "
+                    "none to read.",
                 )
             ]
 
@@ -945,7 +1218,7 @@ class DisksProbe(Probe):
             block_path = udisks.block_for_device(disk["node"])
             if block_path:
                 partition_table = udisks.properties(
-                    block_path, "org.freedesktop.UDisks2.PartitionTable"
+                    block_path, IFACE_PARTITION_TABLE
                 )
                 kind = partition_table.get("Type")
                 if kind:

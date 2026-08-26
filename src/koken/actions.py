@@ -28,7 +28,9 @@ blocked interface during those seconds would look like a crash.
 
 from __future__ import annotations
 
-from .probes.disks import IFACE_BLOCK, IFACE_FILESYSTEM, SERVICE, _decode_bytes, client
+from .probes.base import read_lines
+from .probes.disks import IFACE_FILESYSTEM, SERVICE, _decode_bytes, client
+from .probes.volumes import parse_mounts
 
 MOUNT = "Mount"
 UNMOUNT = "Unmount"
@@ -101,7 +103,15 @@ class Result:
 
 
 class DBusCaller:
-    """Makes the real asynchronous call. The only part that touches the bus."""
+    """Makes the real asynchronous call. The only part that touches the bus.
+
+    *bus* is the system bus unless one is handed in, which is how the two
+    calls this application is allowed to make can be exercised against a
+    service on a session bus.
+    """
+
+    def __init__(self, bus=None) -> None:
+        self._bus = bus
 
     def call(self, object_path: str, method: str, on_done) -> bool:
         """Invoke *method* with empty options. ``on_done(Result)`` when it lands.
@@ -118,7 +128,7 @@ class DBusCaller:
         except ImportError:
             return False
 
-        bus = QDBusConnection.systemBus()
+        bus = self._bus if self._bus is not None else QDBusConnection.systemBus()
         if not bus.isConnected():
             return False
 
@@ -182,31 +192,47 @@ class MountActions:
         return udisks.block_for_device(device_node)
 
     def current_mount_point(self, device_node: str) -> str | None:
-        """Where udisks2 believes the device is mounted at this moment."""
+        """Where the device is mounted at this moment, or None.
+
+        udisks2 is asked first, and answers with an ``aay`` that this Qt
+        binding cannot demarshal, so in practice the answer comes from
+        ``/proc/mounts`` - which is where udisks2 reads it from as well.
+        """
         udisks = client()
-        if not udisks.available:
-            return None
-        path = udisks.block_for_device(device_node)
-        if path is None:
-            return None
-        filesystem = udisks.properties(path, IFACE_FILESYSTEM, refresh=True)
-        points = filesystem.get("MountPoints")
-        if isinstance(points, list):
-            for item in points:
-                text = _decode_bytes(item)
-                if text:
-                    return text
+        if udisks.available:
+            path = udisks.block_for_device(device_node)
+            if path is not None:
+                filesystem = udisks.properties(path, IFACE_FILESYSTEM, refresh=True)
+                points = filesystem.get("MountPoints")
+                if isinstance(points, list):
+                    for item in points:
+                        text = _decode_bytes(item)
+                        if text:
+                            return text
+        for entry in parse_mounts(read_lines("/proc/mounts")):
+            if entry["source"] == device_node:
+                return entry["target"]
         return None
 
     def perform(self, device_node: str, method: str, on_done) -> None:
         """Run *method* against whatever object holds *device_node* now."""
+        udisks = client()
+        if not udisks.available:
+            # The client's own reason, which names what failed. A flat "udisks2
+            # is not available" here once sat under a row that was showing a
+            # live mount point read from /proc/mounts, which reads as the
+            # button being broken rather than as udisks2 being unreachable.
+            on_done(Result(False, udisks.full_reason))
+            return
+
         object_path = self.resolve_object_path(device_node)
         if object_path is None:
             on_done(
                 Result(
                     False,
-                    "udisks2 is not available, so this filesystem cannot be "
-                    "mounted or unmounted from here.",
+                    f"udisks2 is running but has no object for {device_node}, so "
+                    "there is nothing to send this to. The device may have been "
+                    "removed since this view was built.",
                 )
             )
             return
