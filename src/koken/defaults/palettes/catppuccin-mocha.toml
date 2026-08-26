@@ -1,0 +1,27 @@
+# Catppuccin Mocha, the dark palette KOKEN ships with, and the one used
+# when the desktop portal cannot be asked which the system prefers.
+#
+# Copy this file, change the name and the colours, and drop it back into
+# this directory to add a palette. Delete a file to remove one. There is
+# nothing else to configure, and no theme picker in the interface: which
+# palette is used follows the system's light or dark setting.
+#
+# Twelve roles, no more. A file missing one of them falls back to the
+# shipped palette of the same variant for that role alone.
+
+name = "Catppuccin Mocha"
+variant = "dark"
+
+[colors]
+base    = "#1e1e2e"
+surface = "#313244"
+overlay = "#6c7086"
+border  = "#45475a"
+text    = "#cdd6f4"
+subtext = "#a6adc8"
+muted   = "#9399b2"
+accent  = "#89b4fa"
+success = "#a6e3a1"
+warning = "#f9e2af"
+danger  = "#f38ba8"
+selection = "#45475a"

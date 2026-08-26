@@ -1,0 +1,26 @@
+# Catppuccin Latte, the light palette KOKEN ships with.
+#
+# Copy this file, change the name and the colours, and drop it back into
+# this directory to add a palette. Delete a file to remove one. There is
+# nothing else to configure, and no theme picker in the interface: which
+# palette is used follows the system's light or dark setting.
+#
+# Twelve roles, no more. A file missing one of them falls back to the
+# shipped palette of the same variant for that role alone.
+
+name = "Catppuccin Latte"
+variant = "light"
+
+[colors]
+base    = "#eff1f5"
+surface = "#e6e9ef"
+overlay = "#ccd0da"
+border  = "#dce0e8"
+text    = "#4c4f69"
+subtext = "#6c6f85"
+muted   = "#9ca0b0"
+accent  = "#1e66f5"
+success = "#40a02b"
+warning = "#df8e1d"
+danger  = "#d20f39"
+selection = "#dce0e8"
