@@ -81,159 +81,34 @@ from .base import list_dir, resolve
 #   Qt soname mean the application is a GTK or Qt application, and there the
 #   newer major version wins, because an application linking both is mid-port
 #   and the newer one is what it draws with.
-#
-# `note` is the lead paragraph of the row's own expansion, before the list of
-# applications. It is here rather than in the explanation corpus because the
-# row's body has to carry the machine's own list, and a row body supplied by a
-# probe replaces the corpus entry rather than joining it.
 
 
 @dataclass(frozen=True)
 class Toolkit:
+    """One toolkit KOKEN can recognise.
+
+    No explanation text lives here. What each toolkit means for the machine -
+    why a GTK 3 application ignores a GTK 4 theme, what an Electron
+    application costs - belongs in the explanation file, keyed by the row id
+    `system.desktop.toolkit_<key>`, where it can be read and edited without a
+    release.
+    """
+
     key: str
     label: str
     rank: int
-    note: str
 
 
 TOOLKITS: tuple[Toolkit, ...] = (
-    Toolkit(
-        "electron",
-        "Electron",
-        0,
-        "Electron applications are web pages. Each one carries its own copy of "
-        "Chromium and its own copy of Node, so the version of the browser "
-        "inside one has nothing to do with the version of the browser inside "
-        "the next, or with any browser installed on this machine. That is what "
-        "the memory goes on: a single Electron application starts a browser "
-        "engine, a renderer process per window, a GPU process and a utility "
-        "process before it has drawn anything, and two hundred megabytes "
-        "resident is ordinary rather than exceptional. Nothing is shared "
-        "between two of them, so ten Electron applications are ten copies. "
-        "They also draw their own widgets, which is why an Electron "
-        "application ignores the system widget theme, the system font "
-        "settings and, usually, the system title bar, and why its text "
-        "selection and scrollbars behave like a web page rather than like the "
-        "rest of the desktop. KÖKEN files these first: an Electron binary "
-        "links GTK 3 as well, for the file dialog and the window, but calling "
-        "it a GTK 3 application would say nothing true about it.",
-    ),
-    Toolkit(
-        "java",
-        "Java",
-        1,
-        "A Java application is a launcher that starts a virtual machine and "
-        "hands it a jar. The widgets are drawn inside that machine by Swing or "
-        "by SWT, not by any library the system linker loaded, which is why a "
-        "Java application looks like itself everywhere and why the GTK look "
-        "and feel it may offer is an imitation drawn by Java rather than GTK "
-        "doing the drawing. Two consequences show up on a modern desktop: "
-        "display scaling is the JVM's own setting rather than the desktop's, "
-        "so a Java application on a HiDPI screen is often the one rendering at "
-        "half size until sun.java2d.uiScale is set for it, and the font "
-        "rendering is Java's own, so hinting and antialiasing settings applied "
-        "to everything else stop at its window edge.",
-    ),
-    Toolkit(
-        "wx",
-        "wxWidgets",
-        2,
-        "wxWidgets is not a widget set of its own on Linux - it is a layer over "
-        "GTK, and every wx binary links GTK for that reason. The practical "
-        "effect is that a wx application inherits the GTK theme and the GTK "
-        "file dialog, and therefore mostly looks right, but its layout, its "
-        "menus and its dialogs are wx's idea of those things rather than the "
-        "desktop's. KÖKEN files these as wx rather than as GTK because the GTK "
-        "soname in the binary comes from the wrapper, not from the "
-        "application's own code, and because a GTK theme change reaches it "
-        "only as far as wx passes it through.",
-    ),
-    Toolkit(
-        "qt6",
-        "Qt 6",
-        3,
-        "Qt 6 scales fractionally and does it per screen, always: the "
-        "device-pixel-ratio work that was optional in Qt 5 is compiled in and "
-        "on, so a Qt 6 application on a 150% display renders at 150% rather "
-        "than at 100% or 200%. It also reads its own settings rather than the "
-        "desktop's - a GNOME or Xfce session hands a Qt application no widget "
-        "style, no icon theme and no font unless qt6ct or a platform theme "
-        "plugin is installed to translate, and Qt 5's translation layer (qt5ct, "
-        "the Qt 5 platform themes) does not serve Qt 6. That is why Qt 5 and "
-        "Qt 6 applications on the same desktop can disagree about cursor size, "
-        "icon set and scaling at the same time: they are reading two different "
-        "sets of settings, and where the cursor theme is concerned Qt 6 asks "
-        "the compositor while Qt 5 reads the X resource.",
-    ),
-    Toolkit(
-        "qt5",
-        "Qt 5",
-        4,
-        "Qt 5 scales by whole numbers unless it is told otherwise. Fractional "
-        "scaling needs QT_ENABLE_HIGHDPI_SCALING or QT_SCALE_FACTOR set for it, "
-        "and without them a Qt 5 application on a 150% display is the one "
-        "rendering too small or too large next to its Qt 6 and GTK 4 "
-        "neighbours. Its cursor size comes from the X resource rather than from "
-        "the compositor, which is the usual reason a Qt 5 window shows a cursor "
-        "of a different size from the desktop around it. Its style, icons and "
-        "fonts come from qt5ct or a Qt 5 platform theme, neither of which "
-        "affects Qt 6.",
-    ),
-    Toolkit(
-        "gtk4",
-        "GTK 4",
-        5,
-        "GTK 4 reads its appearance from gtk-4.0/gtk.css and from the libadwaita "
-        "stylesheet, and it cannot read a GTK 3 theme: the widget names, the "
-        "CSS nodes and the drawing model all changed, so a theme written for "
-        "GTK 3 has nothing GTK 4 can apply and is ignored rather than "
-        "half-applied. That is the whole answer to why setting a theme leaves "
-        "some windows changed and some untouched - the untouched ones are on "
-        "the other major version. GTK 4 also renders through GSK, which means "
-        "it wants the GPU, and its dark preference comes from the desktop's "
-        "colour-scheme setting rather than from the theme name.",
-    ),
-    Toolkit(
-        "gtk3",
-        "GTK 3",
-        6,
-        "GTK 3 reads gtk-3.0/gtk.css and the theme named in its own settings, "
-        "which is a different file and a different setting from GTK 4's. A "
-        "desktop running both - and nearly every desktop runs both - is "
-        "theming them separately whether or not the settings panel says so, "
-        "and a GTK 3 application will keep the old appearance until a GTK 3 "
-        "version of the theme is installed as well. Icon themes are the "
-        "exception and are shared. GTK 3 remains the most common toolkit on "
-        "Linux by application count, and is in long-term maintenance rather "
-        "than development, so applications still on it are not behind so much "
-        "as not yet moved.",
-    ),
-    Toolkit(
-        "gtk2",
-        "GTK 2",
-        7,
-        "GTK 2 has had no release since 2020 and takes its appearance from a "
-        "theme engine, a compiled plugin, rather than from CSS - so a GTK 2 "
-        "application cannot use any theme made in the last decade and falls "
-        "back to the default grey unless a matching GTK 2 engine and gtkrc are "
-        "installed for it. It also has no display scaling at all, which is why "
-        "a GTK 2 application on a HiDPI screen is drawn at one physical pixel "
-        "per logical pixel and comes out half size. Anything still here is "
-        "either very old or deliberately frozen.",
-    ),
-    Toolkit(
-        "tk",
-        "Tk",
-        8,
-        "Tk is the widget set that ships with Tcl and, through tkinter, with "
-        "Python. It draws its own controls and reads no desktop setting at "
-        "all: not the theme, not the icon set, not the font, not the cursor "
-        "size and not the scaling factor. A Tk application therefore looks the "
-        "same on every desktop, which is to say it looks like nothing else on "
-        "any of them, and on a HiDPI screen it is drawn at native pixel size "
-        "and comes out small. It is here because it costs almost nothing and "
-        "starts instantly, which for a small utility is a fair trade.",
-    ),
+    Toolkit("electron", "Electron", 0),
+    Toolkit("java", "Java", 1),
+    Toolkit("wx", "wxWidgets", 2),
+    Toolkit("qt6", "Qt 6", 3),
+    Toolkit("qt5", "Qt 5", 4),
+    Toolkit("gtk4", "GTK 4", 5),
+    Toolkit("gtk3", "GTK 3", 6),
+    Toolkit("gtk2", "GTK 2", 7),
+    Toolkit("tk", "Tk", 8),
 )
 
 TOOLKIT_BY_KEY = {toolkit.key: toolkit for toolkit in TOOLKITS}
@@ -342,6 +217,11 @@ MAX_TRANSITIVE = 12  # libraries opened one level below a binary
 
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
+# Directories that belong to the whole system rather than to one application.
+SHARED_BIN_DIRS = frozenset(
+    {"/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin", "/usr/local/sbin"}
+)
+
 # Multilib and multiarch directories, plus the two the Filesystem Hierarchy
 # Standard names. Whichever of these exist is where a soname resolves.
 LIBRARY_DIRS = (
@@ -407,6 +287,7 @@ SCRIPT_SUFFIXES = (".py", ".sh", ".pl", ".rb", ".js", ".jar", ".tcl", ".bash")
 _FIELD_CODES = re.compile(r"(?<!%)%[fFuUdDnNickvm]")
 _ABSOLUTE_PATH = re.compile(r"/[A-Za-z0-9._+@\-]+(?:/[A-Za-z0-9._+@\-]+)+")
 _EXEC_LINE = re.compile(r"^[ \t]*exec[ \t][^\n]*", re.M)
+_VARIABLE_PATH = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/([A-Za-z0-9._+@-]+)")
 
 
 # --------------------------------------------------------------------------
@@ -1258,9 +1139,15 @@ class Scanner:
     # -- the sources ------------------------------------------------------
 
     def electron_markers(self, binary: str) -> str:
-        """Chromium's own files, sitting beside the binary. Nothing else has them."""
+        """Chromium's own files, sitting beside the binary. Nothing else has them.
+
+        Only inside the application's own directory. An Electron application
+        ships as a directory under /opt or /usr/lib holding the binary and its
+        resources; a shared bin directory is not one, and one stray .pak file
+        dropped into /usr/bin must not turn every program in it into a browser.
+        """
         directory = os.path.dirname(binary)
-        if not directory:
+        if not directory or directory.rstrip("/") in SHARED_BIN_DIRS:
             return ""
         names = self.directory_names(directory)
         if not names:
@@ -1339,22 +1226,31 @@ class Scanner:
         text = read_head_text(path, MAX_SCRIPT)
         if not text:
             return []
+        here = os.path.dirname(path)
+        exec_lines = _EXEC_LINE.findall(text)
+
+        candidates: list[str] = []
+        for line in exec_lines:
+            candidates += _ABSOLUTE_PATH.findall(line)
+            # "$sd_prog/oosplash" cannot be expanded without running the shell,
+            # but the file a wrapper names that way is nearly always sitting
+            # beside the wrapper, and that can be checked rather than assumed.
+            candidates += [f"{here}/{name}" for name in _VARIABLE_PATH.findall(line)]
+        candidates += _ABSOLUTE_PATH.findall(text)
+
         ordered: list[str] = []
-        for line in _EXEC_LINE.findall(text) + [text]:
-            for candidate in _ABSOLUTE_PATH.findall(line):
-                if candidate in ordered or candidate == path:
-                    continue
-                if os.path.basename(candidate) in INTERPRETERS:
-                    continue
-                if self.on_network(candidate) or not is_regular(candidate):
-                    continue
-                if not (
-                    is_executable(candidate) or candidate.endswith(SCRIPT_SUFFIXES)
-                ):
-                    continue
-                ordered.append(candidate)
-                if len(ordered) >= MAX_CANDIDATES:
-                    return ordered
+        for candidate in candidates:
+            if candidate in ordered or candidate == path:
+                continue
+            if os.path.basename(candidate) in INTERPRETERS:
+                continue
+            if self.on_network(candidate) or not is_regular(candidate):
+                continue
+            if not (is_executable(candidate) or candidate.endswith(SCRIPT_SUFFIXES)):
+                continue
+            ordered.append(candidate)
+            if len(ordered) >= MAX_CANDIDATES:
+                break
         return ordered
 
     # -- one application --------------------------------------------------
@@ -1370,16 +1266,27 @@ class Scanner:
         binary = self.which(app.command)
         if not binary and app.try_exec:
             # TryExec names the file whose presence gates the entry. Where Exec
-            # names something that is not installed, it is the one that
-            # resolves, and it points at the same program.
-            binary = self.which(exec_tokens(app.try_exec)[:1] and exec_tokens(app.try_exec)[0] or "")
+            # names something that is not installed - a launcher, a shim - it
+            # is the one that resolves, and it points at the same program.
+            spare = exec_tokens(app.try_exec)
+            binary = self.which(spare[0]) if spare else ""
         if not binary:
-            app.evidence = (
-                f"{app.command or 'the Exec line'} could not be found in PATH"
-            )
+            app.evidence = f"{app.command or 'the Exec line'} was not found in PATH"
             self.count("unresolved")
             return
+
         self.inspect(app, binary)
+        if app.toolkit or self.out_of_time():
+            return
+
+        # Last, and only for what is left: what the package that owns the
+        # binary declares it depends on. This is the one source here that
+        # describes the package rather than the program, so it answers only
+        # where nothing else did.
+        key, evidence = self.packages.toolkit(app.binary or binary)
+        if key:
+            app.toolkit, app.evidence = key, evidence
+            self.count("packages")
 
     def classify_flatpak(self, app: Application, identifier: str) -> bool:
         """A Flatpak application, read out of its deployment rather than run.
@@ -1405,7 +1312,7 @@ class Scanner:
             if command:
                 binary = f"{base}/files/bin/{os.path.basename(command)}"
                 if is_regular(binary):
-                    self.inspect(app, binary, flatpak=identifier)
+                    self.inspect(app, binary)
                     if app.toolkit:
                         return True
             key = _runtime_toolkit(runtime)
@@ -1423,14 +1330,24 @@ class Scanner:
                 return True
         return False
 
-    def inspect(self, app: Application, binary: str, flatpak: str = "", hops: int = 0) -> None:
-        """Follow *binary* until something says what it is built with."""
-        if self.on_network(binary):
-            app.evidence = "on a network filesystem, not visited"
-            self.count("network")
+    def inspect(self, app: Application, binary: str, hops: int = 0) -> None:
+        """Follow *binary* until something says what it is built with.
+
+        An executable is asked what it links; anything else is read as text,
+        for what it imports and for where it hands control on to. Those two are
+        not interchangeable - running the wrapper-following pass over an ELF
+        file finds the path of the dynamic loader inside it and follows that,
+        and reports every unclassified program on the machine as being whatever
+        ld-linux is built with.
+        """
+        if self.on_network(binary) or self.out_of_time():
+            if self.on_network(binary):
+                app.evidence = "on a network filesystem, which is never visited"
+                self.count("network")
             return
         binary = follow_links(binary)
-        app.binary = app.binary or binary
+        if not app.binary:
+            app.binary = binary
 
         marker = self.electron_markers(binary)
         if marker:
@@ -1447,25 +1364,23 @@ class Scanner:
                 self.count("libraries")
                 return
             app.evidence = f"{os.path.basename(binary)} links no toolkit"
-        else:
-            key, evidence, _ = self.from_script(binary)
-            if key:
-                app.toolkit, app.evidence = key, evidence
-                self.count("scripts")
+            return
+
+        key, evidence, _ = self.from_script(binary)
+        if key:
+            app.toolkit, app.evidence = key, evidence
+            self.count("scripts")
+            return
+        app.evidence = f"{os.path.basename(binary)} names no toolkit"
+
+        if hops >= MAX_HOPS:
+            return
+        for candidate in self.script_targets(binary):
+            if self.out_of_time():
                 return
-            app.evidence = f"{os.path.basename(binary)} is not an executable image"
-
-        if hops < MAX_HOPS and not self.out_of_time():
-            for candidate in self.script_targets(binary):
-                self.inspect(app, candidate, flatpak=flatpak, hops=hops + 1)
-                if app.toolkit:
-                    return
-
-        if not app.toolkit and not self.out_of_time():
-            key, evidence = self.packages.toolkit(app.binary or binary)
-            if key:
-                app.toolkit, app.evidence = key, evidence
-                self.count("packages")
+            self.inspect(app, candidate, hops=hops + 1)
+            if app.toolkit:
+                return
 
     def count(self, source: str) -> None:
         self.sources[source] = self.sources.get(source, 0) + 1
