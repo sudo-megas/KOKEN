@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 # Deliberately empty. Every runtime dependency is a distribution package, not a
-# Python one: PySide6 ships as python-pyside6 on Arch and as four python3-pyside6.*
+# Python one: PySide6 ships as pyside6 on Arch and as four python3-pyside6.*
 # packages on Debian, and hwdata, udisks2, dmidecode and polkit are not Python
 # packages at all. Declaring PySide6 here would make pip install a second copy
 # alongside the distribution's. See packaging/PKGBUILD and debian/control.

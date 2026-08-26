@@ -93,8 +93,13 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
+          # build-essential is an implicit build dependency of every Debian
+          # source package - policy says not to list it in Build-Depends, and
+          # dpkg-checkbuilddeps checks for it anyway. Nothing else here pulls
+          # it in, and --no-install-recommends makes sure of that, so it is
+          # named explicitly rather than arrived at by accident.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates devscripts debhelper dh-python \
+            build-essential git ca-certificates devscripts debhelper dh-python \
             python3-all python3-build python3-installer python3-hatchling \
             imagemagick
 

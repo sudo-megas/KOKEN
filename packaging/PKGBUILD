@@ -5,7 +5,7 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# Maintainer: Megas
+# Maintainer: sudo-megas <halil@namli.xyz>
 #
 # This is a repository-local PKGBUILD, not an AUR one. `source` is empty and
 # the build happens from the checkout it sits in, so there is no tarball to
@@ -23,7 +23,12 @@ pkgdesc="Machine Corpus - a hardware and system browser that explains what each 
 arch=('any')
 url="https://github.com/sudo-megas/KOKEN"
 license=('GPL-3.0-or-later')
-depends=('python' 'python-pyside6' 'hwdata' 'udisks2' 'dmidecode' 'polkit')
+# `pyside6`, not `python-pyside6`. Arch names most Python modules
+# python-<name>, and PySide6 is one of the exceptions - there is no
+# python-pyside6 to fall back on, so getting it wrong is not a warning:
+# pacman aborts the whole transaction on the unknown target and reports
+# every other dependency as missing too.
+depends=('python' 'pyside6' 'hwdata' 'udisks2' 'dmidecode' 'polkit')
 makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel' 'imagemagick')
 source=()
 sha256sums=()

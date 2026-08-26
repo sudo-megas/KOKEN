@@ -1,10 +1,10 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: koken
-Upstream-Contact: Megas
+Upstream-Contact: sudo-megas <halil@namli.xyz>
 Source: https://github.com/sudo-megas/KOKEN
 
 Files: *
-Copyright: 2026 Megas
+Copyright: 2026 sudo-megas
 License: GPL-3.0-or-later
 
 Files: src/koken/assets/tabler-icons-subset.ttf

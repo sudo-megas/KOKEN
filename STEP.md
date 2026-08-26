@@ -618,6 +618,17 @@ timeout, and twelve start-to-quit cycles checked for a clean exit status.
   "orders requests before sending them to the drive". The property it is after
   is checked as an import-graph property instead, over all 40 source files. No
   network module is imported anywhere and no Qt network class is named.
+- `python-pyside6` does not exist on Arch. CORE.md section 4 and its PKGBUILD
+  in section 16 both name it; the package is `extra/pyside6`, and Arch has no
+  `python-pyside6` to fall back on. Getting this wrong is not a warning at
+  build time: pacman aborts the entire transaction on an unknown target, so
+  `makepkg -s` also reports udisks2, dmidecode and polkit as missing when all
+  three are present. Corrected in the PKGBUILD and in the README's install
+  command, which is the one a person copies.
+- `build-essential` is installed explicitly in the Debian job. It is an
+  implicit build dependency of every Debian source package, which is why policy
+  says not to list it in Build-Depends and why `dpkg-checkbuilddeps` looks for
+  it anyway. Nothing else in the job's package list pulls it in.
 - The polkit prompt was given two minutes rather than ten seconds. §7 sets one
   timeout for the whole `pkexec` run, which covers a person reading an
   authentication prompt they have never seen before. Ten seconds for that is a

@@ -63,7 +63,7 @@ the version where reading the file format the explanations are written in
 became part of Python itself. On 3.10 it would need an extra library to read
 one small text file, which is not a good trade.
 
-### `python-pyside6`
+### `pyside6`
 
 The windows, the buttons, the text. This is Qt, which is what KDE is built on,
 and it is the part of KÖKEN you actually look at.
@@ -161,7 +161,7 @@ You need Python 3.11 or newer, and the six things in section 2.
 On Arch:
 
 ```bash
-sudo pacman -S python python-pyside6 hwdata udisks2 dmidecode polkit git
+sudo pacman -S python pyside6 hwdata udisks2 dmidecode polkit git
 git clone https://github.com/sudo-megas/KOKEN.git
 cd KOKEN
 python -m koken
@@ -385,6 +385,6 @@ that is between you and your backups.
 
 ---
 
-Copyright © 2026 Megas
+Copyright © 2026 sudo-megas
 
 *Built with Reason and Passion.*

@@ -1,7 +1,7 @@
 Source: koken
 Section: utils
 Priority: optional
-Maintainer: Megas <noreply@github.com>
+Maintainer: sudo-megas <halil@namli.xyz>
 Build-Depends: debhelper (>= 13),
                dh-python,
                python3-all,
