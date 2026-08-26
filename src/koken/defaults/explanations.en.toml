@@ -466,10 +466,42 @@ The resolution and refresh rate the display describes as its preferred mode.
 This is the panel's real pixel grid; anything else is being scaled, which on
 an LCD or OLED always costs sharpness.
 
-The refresh rate here comes from the base description block, which cannot
-express very high rates. A display capable of more will show its full range in
-the supported range row, and the higher modes live in extension blocks that
-KOKEN does not unpack.
+The base description block stores a mode's pixel clock in sixteen bits of ten
+kilohertz each, so it stops at 655.35 MHz - not enough for 1440p much above 150
+Hz, and nowhere near enough for 1440p at 280, which needs about 1095 MHz. A fast
+display is therefore obliged to write something slower in that block and state
+its real modes in the extension blocks that follow. KOKEN reads those, which is
+why the rate here can be higher than the base block alone would allow.
+
+Where the two disagree, the base block's own choice is shown separately as the
+preferred timing, because a display that names a modest mode as preferred is
+often saying something deliberate about which rate it is happiest at.
+"""
+
+[hardware.displays.preferred_mode]
+long = """
+The mode the display's base description block names first, which by convention
+is the one it would rather be driven at.
+
+It differs from the native mode whenever the display's best timing is too fast
+to be written into that block at all, which is the ordinary case on a
+high-refresh monitor. Seeing a lower rate here than in the native row is not a
+fault and not a downgrade - it is the display saying "this is the mode I can
+describe in the oldest part of my description", and the extension blocks saying
+what it can really do.
+"""
+
+[hardware.displays.cta_formats]
+long = """
+Video formats this display tells the graphics card it will accept, listed by
+their CTA-861 code.
+
+Accepting a format is not the same as having a panel for it. A 1080p television
+commonly accepts 2160p and scales it down, and would look like a 4K display if
+this list were read as a statement about its pixel grid. That is why these codes
+are shown here on their own and are never used to work out the native mode -
+only timings the display spells out in full are treated as claims about its own
+grid.
 """
 
 [hardware.displays.serial]
