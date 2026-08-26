@@ -56,6 +56,11 @@ SERIAL_FILES = ("product_serial", "board_serial", "product_uuid")
 DMIDECODE_TIMEOUT = 5
 
 
+# The one line that genuinely opens a record. Field lines are indented, so
+# an `Array Handle:` inside a record cannot be mistaken for the start of one.
+_HANDLE_LINE = re.compile(r"^Handle (0x[0-9A-Fa-f]+), DMI type (\d+)")
+
+
 def find_dmidecode():
     for candidate in DMIDECODE_CANDIDATES:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -66,61 +71,59 @@ def find_dmidecode():
 def parse_dmidecode(text):
     """Split dmidecode's output into one dict per record.
 
-    dmidecode prints a preamble, then records separated by blank lines. A
-    record opens with ``Handle 0x0009, DMI type 17, 32 bytes``, names its type
-    on the next line, and then lists ``Key: Value`` pairs one tab in. A key
-    whose value is empty introduces a list, whose items sit two tabs in - the
-    memory types a slot supports are written that way.
+    dmidecode prints a preamble, then records. A record opens with
+    ``Handle 0x0009, DMI type 17, 32 bytes``, names its type on the next line,
+    and then lists ``Key: Value`` pairs one tab in. A key whose value is empty
+    introduces a list whose items sit two tabs in - a slot with more than one
+    operating mode capability is written that way.
+
+    Records are cut at the ``Handle`` lines, not at the blank lines between
+    them. Splitting on blank lines is easier and is wrong: one extra blank line
+    inside a record - a dmidecode that spaces its indented lists out, a warning
+    printed part-way through the table - silently drops the remainder of that
+    record, and the caller then sees a memory slot that has a locator and no
+    size rather than seeing an error. The ``Handle`` line is the only thing
+    that genuinely starts a record, so it is the only thing worth cutting on.
     """
     records = []
-    for block in text.split("\n\n"):
-        lines = block.split("\n")
-        handle_line = None
-        for index, line in enumerate(lines):
-            if line.startswith("Handle "):
-                handle_line = index
-                break
-        if handle_line is None:
+    record = None
+    pending = None  # a key whose value was empty, and may yet open a list
+    for line in text.splitlines():
+        match = _HANDLE_LINE.match(line)
+        if match:
+            record = {
+                "handle": match.group(1),
+                "type": int(match.group(2)),
+                "name": "",
+                "fields": {},
+            }
+            records.append(record)
+            pending = None
             continue
-
-        match = re.match(
-            r"Handle (0x[0-9A-Fa-f]+), DMI type (\d+)", lines[handle_line]
-        )
-        if not match:
+        if record is None:
+            continue  # the preamble, before any record has opened
+        body = line.strip()
+        if not body:
             continue
-
-        record = {
-            "handle": match.group(1),
-            "type": int(match.group(2)),
-            "name": lines[handle_line + 1].strip()
-            if handle_line + 1 < len(lines)
-            else "",
-            "fields": {},
-        }
-
-        current_list_key = None
-        for line in lines[handle_line + 2 :]:
-            if not line.strip():
-                continue
-            depth = len(line) - len(line.lstrip("\t"))
-            body = line.strip()
-            if depth >= 2 and current_list_key is not None:
-                record["fields"].setdefault(current_list_key, [])
-                if isinstance(record["fields"][current_list_key], list):
-                    record["fields"][current_list_key].append(body)
-                continue
-            if ":" not in body:
-                continue
-            key, _, value = body.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if value:
-                record["fields"][key] = value
-                current_list_key = None
-            else:
-                record["fields"][key] = []
-                current_list_key = key
-        records.append(record)
+        depth = len(line) - len(line.lstrip("\t"))
+        if depth == 0 and not record["name"]:
+            # The line under the handle names the record: `Memory Device`.
+            record["name"] = body
+            continue
+        if depth >= 2 and pending is not None:
+            if not isinstance(record["fields"].get(pending), list):
+                record["fields"][pending] = []
+            record["fields"][pending].append(body)
+            continue
+        if ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        record["fields"][key] = value
+        pending = key if not value else None
     return records
 
 

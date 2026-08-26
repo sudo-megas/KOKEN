@@ -35,6 +35,7 @@ from .base import (
     Probe,
     Section,
     fmt_bytes,
+    fmt_list,
     fmt_percent,
     or_missing,
     read_lines,
@@ -44,8 +45,12 @@ MEMINFO = "/proc/meminfo"
 
 # Tried in order against the bank locator, then the locator. Firmware vendors
 # do not agree on a format, so each of these covers a real family of boards.
+# `CHANNEL`, `CHAN` and `CH` are all in use and all mean the same thing: AMD
+# boards write `P0 CHANNEL A`, several write `CHAN A DIMM 0`, and the short
+# form turns up on Intel laptops. Only the short one needs a word boundary
+# after the letter, to keep it from reading the `I` of `CHIP A` as a channel.
 _CHANNEL_PATTERNS = (
-    re.compile(r"CHANNEL\s*[-_]?\s*([A-Z0-9])", re.IGNORECASE),
+    re.compile(r"\bCHAN(?:NEL)?\s*[-_]?\s*([A-Z0-9])", re.IGNORECASE),
     re.compile(r"\bCH\s*[-_]?\s*([A-Z0-9])\b", re.IGNORECASE),
     re.compile(r"DIMM\s*[-_]?\s*([A-Z])\s*\d", re.IGNORECASE),
     re.compile(r"^\s*([A-Z])\s*\d\s*$", re.IGNORECASE),
@@ -95,21 +100,39 @@ def parse_meminfo(lines) -> dict[str, int]:
     return out
 
 
-def parse_dmi_size(text: str | None) -> int | None:
-    """``16 GB``, ``8192 MB``, ``No Module Installed`` -> bytes or None.
+# Both spellings of every unit, because dmidecode changed its mind. Up to and
+# including 3.6 it printed `Size: 16 GB`; 3.7 switched to binary prefixes and
+# prints `Size: 16 GiB` for the identical module. Both mean 2**30 bytes - the
+# quantity never changed, only the label on it - so both are read the same way
+# and a machine reads the same whichever version of dmidecode is installed.
+# A pattern that insists on `GB` sees no size at all on a current Arch box,
+# and every populated slot then renders as an empty one.
+_DMI_SIZE = re.compile(r"^\s*(\d+)\s*(bytes|B|[KMGTPE]i?B)\b", re.IGNORECASE)
 
-    DMI sizes are binary despite the unit spelling, which is why a "16 GB"
-    module shows as 16 GiB here and everywhere else on the system.
+_DMI_SIZE_FACTORS = {
+    "k": 1024,
+    "m": 1024**2,
+    "g": 1024**3,
+    "t": 1024**4,
+    "p": 1024**5,
+    "e": 1024**6,
+}
+
+
+def parse_dmi_size(text: str | None) -> int | None:
+    """``16 GiB``, ``16 GB``, ``8192 MB``, ``No Module Installed`` -> bytes or None.
+
+    DMI sizes are binary whichever way the unit is spelt, which is why a
+    "16 GB" module shows as 16 GiB here and everywhere else on the system.
     """
-    if not text:
+    if not isinstance(text, str):
         return None
-    match = re.match(r"^\s*(\d+)\s*([kKmMgGtT])?B\b", text)
+    match = _DMI_SIZE.match(text)
     if not match:
         return None
-    value = int(match.group(1))
-    unit = (match.group(2) or "").lower()
-    factor = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}.get(unit, 1)
-    return value * factor
+    unit = match.group(2).lower()
+    factor = 1 if unit in ("b", "bytes") else _DMI_SIZE_FACTORS.get(unit[0], 1)
+    return int(match.group(1)) * factor
 
 
 def channel_of(locator: str | None, bank_locator: str | None) -> str | None:
@@ -124,20 +147,39 @@ def channel_of(locator: str | None, bank_locator: str | None) -> str | None:
     return None
 
 
-def _populated(record: dict) -> bool:
-    """Whether this slot has a module in it.
+# What a slot is. Three states rather than two, because "the firmware did not
+# say" is not the same claim as "there is nothing in it", and only one of them
+# is safe to print next to a slot that may well be full.
+SLOT_FILLED = "filled"
+SLOT_EMPTY = "empty"
+SLOT_UNKNOWN = "unknown"
 
-    An empty slot is usually written `No Module Installed`, which parses to
-    None. Some firmware writes `0 MB` instead, which parses to a perfectly
-    valid zero - and counting that as a module gives a machine with two sticks
-    in four slots a slot count of four, all of them "populated", next to a
-    total that adds up to the two.
-    """
-    fields = record.get("fields", {})
-    size = fields.get("Size")
-    if not size:
-        return False
-    return bool(parse_dmi_size(size))
+# How firmware writes an empty slot. `0 MB` parses to a perfectly valid zero,
+# which is why the size is tested before the wording: counting it as a module
+# gives a machine with two sticks in four slots a slot count of four, all of
+# them "populated", next to a total that adds up to the two.
+_EMPTY_SIZE_WORDS = frozenset(
+    {"no module installed", "not installed", "none", "not specified", "0"}
+)
+
+
+def slot_state(record: dict) -> tuple[str, int | None]:
+    """A slot's state and, when it has one, the size of the module in it."""
+    size = record.get("fields", {}).get("Size")
+    parsed = parse_dmi_size(size)
+    if parsed:
+        return SLOT_FILLED, parsed
+    if parsed == 0:
+        return SLOT_EMPTY, None
+    text = size.strip().lower() if isinstance(size, str) else ""
+    if text in _EMPTY_SIZE_WORDS:
+        return SLOT_EMPTY, None
+    return SLOT_UNKNOWN, None
+
+
+def _populated(record: dict) -> bool:
+    """Whether this slot has a module in it."""
+    return slot_state(record)[0] == SLOT_FILLED
 
 
 class MemoryProbe(Probe):
@@ -267,7 +309,13 @@ class MemoryProbe(Probe):
 
     def _array_rows(self, arrays, modules) -> list:
         rows = []
-        populated = [record for record in modules if _populated(record)]
+        states = [slot_state(record) for record in modules]
+        populated = [
+            record
+            for record, (state, _size) in zip(modules, states)
+            if state == SLOT_FILLED
+        ]
+        unreported = sum(1 for state, _size in states if state == SLOT_UNKNOWN)
 
         if arrays:
             fields = arrays[0].get("fields", {})
@@ -282,9 +330,10 @@ class MemoryProbe(Probe):
                 self.row(
                     "slots",
                     "Slots",
-                    "{} total, {} populated".format(
+                    "{} total, {} populated{}".format(
                         or_missing(fields.get("Number Of Devices"), str(len(modules))),
                         len(populated),
+                        f", {unreported} not reported" if unreported else "",
                     ),
                 )
             )
@@ -300,13 +349,15 @@ class MemoryProbe(Probe):
                 self.row(
                     "slots",
                     "Slots",
-                    f"{len(modules)} total, {len(populated)} populated",
+                    "{} total, {} populated{}".format(
+                        len(modules),
+                        len(populated),
+                        f", {unreported} not reported" if unreported else "",
+                    ),
                 )
             )
 
-        installed = sum(
-            parse_dmi_size(record["fields"].get("Size")) or 0 for record in populated
-        )
+        installed = sum(size or 0 for _state, size in states)
         if installed:
             rows.append(self.row("installed", "Installed", fmt_bytes(installed)))
 
@@ -315,20 +366,37 @@ class MemoryProbe(Probe):
 
     def _channel_row(self, populated, modules):
         """The derived channel configuration, and the warning when it is wrong."""
-        channels = []
-        for record in populated:
-            fields = record.get("fields", {})
-            channel = channel_of(fields.get("Locator"), fields.get("Bank Locator"))
-            if channel is not None:
-                channels.append(channel)
+        channels = _channels_named_by(populated)
 
         if not channels:
-            return self.row(
-                "channels",
-                "Channel configuration",
-                "This firmware does not name a channel for any slot, so the "
-                "configuration cannot be derived.",
-            )
+            # Whatever this row says, it is read directly above a list of slots
+            # that print their bank locators. Saying no slot names a channel
+            # while every row underneath reads `P0 CHANNEL A` is a
+            # contradiction the reader can see, so the row says which of the
+            # two things is actually true instead.
+            named = sorted(set(_channels_named_by(modules)))
+            if not modules:
+                value = (
+                    "No memory devices are reported, so there is no "
+                    "configuration to derive."
+                )
+            elif named and not populated:
+                value = (
+                    "No slot reports a module, so there is no configuration to "
+                    "derive. The slots themselves name "
+                    f"{fmt_list(named)}."
+                )
+            elif named:
+                value = (
+                    "No populated slot names a channel, so the configuration "
+                    f"cannot be derived. The slots name {fmt_list(named)}."
+                )
+            else:
+                value = (
+                    "This firmware does not name a channel for any slot, so the "
+                    "configuration cannot be derived."
+                )
+            return self.row("channels", "Channel configuration", value)
 
         distinct = sorted(set(channels))
         count = len(distinct)
@@ -346,16 +414,31 @@ class MemoryProbe(Probe):
         fields = record.get("fields", {})
         locator = fields.get("Locator") or f"Slot {index}"
         bank = fields.get("Bank Locator")
-        size = parse_dmi_size(fields.get("Size"))
+        state, size = slot_state(record)
+        suffix = f" ({bank})" if bank else ""
 
-        # `or None` for the same reason _populated does it: a `0 MB` slot is an
-        # empty one, and the row below would otherwise read "0 B".
-        if not size:
+        if state == SLOT_EMPTY:
             return [
                 self.row(
                     "dimm_empty",
                     locator,
-                    "Empty" + (f" ({bank})" if bank else ""),
+                    "Empty" + suffix,
+                    key=f"slot{index}",
+                )
+            ]
+        if state != SLOT_FILLED:
+            # The firmware wrote something in the size field that is not a
+            # size - `Unknown` is the usual one. The slot may well be full, so
+            # this says what happened rather than calling it empty.
+            written = fields.get("Size")
+            written = written.strip() if isinstance(written, str) else ""
+            return [
+                self.row(
+                    "dimm_unknown",
+                    locator,
+                    "Size not reported by the firmware"
+                    + (f", which wrote “{written}”" if written else "")
+                    + suffix,
                     key=f"slot{index}",
                 )
             ]
@@ -434,6 +517,17 @@ class MemoryProbe(Probe):
                 detail += f" (page size {fmt_bytes(hugepage_size)})"
             rows.append(self.row("hugepages", "Huge pages", detail, tier=VOLATILE))
         return {"overview": rows}
+
+
+def _channels_named_by(records) -> list[str]:
+    """Every channel named by these slots, one entry per slot that names one."""
+    out = []
+    for record in records:
+        fields = record.get("fields", {})
+        channel = channel_of(fields.get("Locator"), fields.get("Bank Locator"))
+        if channel is not None:
+            out.append(channel)
+    return out
 
 
 def _parse_speed(text: str | None) -> int | None:

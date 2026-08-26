@@ -23,6 +23,15 @@ showing 100% charge is full, and holds under two thirds of what it used to.
 Some batteries report charge in microampere-hours and others report energy in
 microwatt-hours. Both are handled, because a laptop that reports energy would
 otherwise show nothing at all.
+
+Not every battery in ``/sys/class/power_supply`` belongs to the machine. A
+wireless mouse, keyboard, headset or controller registers its own, and the
+kernel marks the difference with ``scope``: ``System`` for the pack in the
+machine, ``Device`` for the one in the thing on the desk. Both are shown and
+they are never mixed together, because they answer different questions - a
+peripheral publishes a percentage and a charging state and nothing else, so
+asking it for wear or for a time estimate produces either an empty row or a
+confident number worked out from nothing.
 """
 
 from __future__ import annotations
@@ -49,12 +58,49 @@ SUPPLY_ROOT = "/sys/class/power_supply"
 # Below this, a battery is worn enough to be worth flagging.
 HEALTH_WARNING = 80.0
 
+# `scope` as the kernel writes it. `Device` means the battery belongs to a
+# peripheral - hid-logitech-hidpp and the generic HID battery both set it -
+# and `System`, or nothing at all, means the machine's own pack.
+DEVICE_SCOPE = "device"
+
+# Consulted only when `type` is missing or reads Unknown. An entry that
+# publishes any of these is a battery whatever its type file says, and a
+# battery that is listed but not recognised is the one failure mode this
+# section cannot afford: the answer would be "no battery" on a machine that
+# has one.
+BATTERY_MARKERS = (
+    "capacity",
+    "capacity_level",
+    "charge_now",
+    "energy_now",
+    "charge_full",
+    "energy_full",
+)
+
+# What a draw figure, a stored figure and a time estimate are worked out from.
+# A battery that publishes none of them gets none of those rows rather than a
+# row of dashes for each.
+RATE_FILES = ("power_now", "current_now")
+STORE_FILES = ("energy_now", "charge_now")
+
+# Levels, for the batteries that report a word instead of a percentage.
+LOW_LEVELS = ("low", "critical")
+
 STATUS_TEXT = {
     "Charging": "Charging",
     "Discharging": "Discharging — running on battery",
     "Full": "Full",
     "Not charging": "Not charging — held at its current level on purpose",
     "Unknown": "Unknown",
+}
+
+# The same states, worded for something that is not the machine.
+DEVICE_STATUS_TEXT = {
+    "Charging": "Charging",
+    "Discharging": "Discharging — the device is running on its own battery",
+    "Full": "Full",
+    "Not charging": "Not charging — held at its current level on purpose",
+    "Unknown": "Unknown — the device did not say",
 }
 
 
@@ -66,17 +112,39 @@ class PowerProbe(Probe):
     def _find_supplies(self) -> list[dict]:
         supplies = []
         for path in list_dir(SUPPLY_ROOT):
-            kind = read_first_line(path / "type")
+            reported = read_first_line(path / "type")
+            kind = (reported or "").lower()
+            scope = read_first_line(path / "scope")
+            is_battery = kind == "battery" or (
+                kind in ("", "unknown")
+                and any(path_exists(path / name) for name in BATTERY_MARKERS)
+            )
             supplies.append(
                 {
                     "name": path.name,
                     "path": path,
-                    "type": kind,
-                    "is_battery": (kind or "").lower() == "battery",
-                    "is_mains": (kind or "").lower() == "mains",
+                    "type": reported,
+                    "scope": scope,
+                    "is_battery": is_battery,
+                    "is_mains": kind == "mains",
+                    "is_peripheral": (scope or "").lower() == DEVICE_SCOPE,
                 }
             )
         return supplies
+
+    @staticmethod
+    def _sort(supplies) -> tuple[list, list, list]:
+        """The machine's own batteries, the peripherals', and the mains inputs."""
+        system = [
+            item
+            for item in supplies
+            if item["is_battery"] and not item["is_peripheral"]
+        ]
+        devices = [
+            item for item in supplies if item["is_battery"] and item["is_peripheral"]
+        ]
+        mains = [item for item in supplies if item["is_mains"]]
+        return system, devices, mains
 
     def sections(self) -> list[Section]:
         supplies = self._find_supplies()
@@ -102,29 +170,43 @@ class PowerProbe(Probe):
             )
             return section
 
-        batteries = [item for item in supplies if item["is_battery"]]
-        mains = [item for item in supplies if item["is_mains"]]
+        batteries, devices, mains = self._sort(supplies)
 
+        counted = [
+            _plural(len(batteries), "battery in the machine", "batteries in the machine"),
+            _plural(len(devices), "on a peripheral", "on peripherals"),
+            _plural(len(mains), "mains input", "mains inputs"),
+        ]
+        counted = [text for text in counted if text]
         section.add(
             self.row(
                 "supply_count",
                 "Power supplies",
-                "{} in total — {} batteries, {} mains".format(
-                    len(supplies), len(batteries), len(mains)
+                "{} in total{}".format(
+                    len(supplies), " — " + ", ".join(counted) if counted else ""
                 ),
             )
         )
         for row in self._mains_rows(mains):
             section.add(row)
-        section.add(
-            self.row(
-                "battery_present",
-                "Batteries",
-                fmt_list(item["name"] for item in batteries)
-                if batteries
-                else "None — this machine runs on mains power only",
+        if batteries:
+            present = fmt_list(item["name"] for item in batteries)
+        elif devices:
+            present = (
+                "None in the machine itself — it runs on mains power only. The "
+                "batteries below belong to peripherals."
             )
-        )
+        else:
+            present = "None — this machine runs on mains power only"
+        section.add(self.row("battery_present", "Batteries", present))
+        if devices:
+            section.add(
+                self.row(
+                    "battery_peripheral_present",
+                    "Peripheral batteries",
+                    fmt_list(_device_name(item) for item in devices),
+                )
+            )
 
         profile = read_first_line("/sys/firmware/acpi/platform_profile")
         if profile:
@@ -161,33 +243,151 @@ class PowerProbe(Probe):
 
     def _battery(self, supplies) -> Section:
         section = Section(id="battery", label="Battery")
-        batteries = [item for item in supplies if item["is_battery"]]
+        batteries, devices, _mains = self._sort(supplies)
 
         if not batteries:
             section.add(
                 self.row(
                     "battery_absent",
                     "Battery",
-                    "No battery is present on this machine.",
+                    "No battery is present in the machine itself."
+                    if devices
+                    else "No battery is present on this machine.",
                 )
             )
             section.add(
                 self.row(
                     "battery_absent_detail",
                     "How this was determined",
-                    "Nothing under /sys/class/power_supply reports a type of "
-                    "Battery. On a desktop that is the expected answer. On a "
-                    "portable machine it means the battery driver has not loaded, "
-                    "and the firmware setting or the kernel module is the place to "
-                    "look.",
+                    "Nothing under /sys/class/power_supply reports a battery "
+                    "belonging to the machine. On a desktop that is the expected "
+                    "answer. On a portable machine it means the battery driver "
+                    "has not loaded, and the firmware setting or the kernel "
+                    "module is the place to look."
+                    + (
+                        " The peripherals below report batteries of their own."
+                        if devices
+                        else ""
+                    ),
                 )
             )
-            return section
 
         for battery in batteries:
             for row in self._battery_rows(battery):
                 section.add(row)
+        for battery in devices:
+            for row in self._device_rows(battery):
+                section.add(row)
         return section
+
+    # -- peripheral batteries ---------------------------------------------
+
+    def _device_rows(self, battery) -> list:
+        """One wireless mouse, keyboard, headset or controller.
+
+        Kept apart from the machine's own pack on purpose. The name of the
+        thing goes in the label, because `hidpp_battery_0` names a driver and
+        not anything a person owns, and the rows below it are only the ones the
+        device actually answers.
+        """
+        path = battery["path"]
+        prefix = battery["name"]
+        rows = [
+            self.row(
+                "battery_peripheral",
+                _device_name(battery),
+                fmt_list(
+                    (
+                        "Peripheral battery",
+                        read_first_line(path / "manufacturer"),
+                        f"reported as {prefix}",
+                    ),
+                    separator=" · ",
+                ),
+                key=f"{prefix}peripheral",
+            )
+        ]
+        rows.extend(self._device_volatile_rows(battery))
+
+        serial = read_first_line(path / "serial_number")
+        if serial:
+            rows.append(
+                self.row(
+                    "battery_serial",
+                    "  Serial number",
+                    serial,
+                    key=f"{prefix}serial",
+                )
+            )
+
+        # A pack in a laptop answers for its wear and for how long it has left.
+        # A device battery answers neither question, and the honest thing is to
+        # say so once rather than to print two rows of dashes or a time
+        # estimate divided out of numbers that are not there.
+        if not _reports_rate(path):
+            rows.append(
+                self.row(
+                    "battery_peripheral_limits",
+                    "  What this device reports",
+                    "Its charge and its state, and nothing else. It publishes no "
+                    "design capacity, so there is no health figure for it, and no "
+                    "discharge rate, so there is no time estimate.",
+                    key=f"{prefix}limits",
+                )
+            )
+        return rows
+
+    def _device_volatile_rows(self, battery) -> list:
+        """Charge and state: the two things every device battery answers."""
+        path = battery["path"]
+        prefix = battery["name"]
+        capacity = read_int(path / "capacity")
+        level = read_first_line(path / "capacity_level")
+        status = read_first_line(path / "status")
+
+        if capacity is not None:
+            charge = f"{capacity}%"
+            low = capacity <= 10
+        elif level:
+            charge = f"{level} — this device reports a level, not a percentage"
+            low = level.lower() in LOW_LEVELS
+        else:
+            charge = NOT_REPORTED
+            low = False
+
+        rows = [
+            self.row(
+                "battery_charge",
+                "  Charge",
+                charge,
+                tier=VOLATILE,
+                severity=WARNING if low else "normal",
+                key=f"{prefix}charge",
+            ),
+            self.row(
+                "battery_status",
+                "  Status",
+                DEVICE_STATUS_TEXT.get(status or "", or_missing(status, NOT_REPORTED)),
+                tier=VOLATILE,
+                key=f"{prefix}status",
+            ),
+        ]
+        voltage = read_int(path / "voltage_now")
+        if voltage is not None:
+            rows.append(
+                self.row(
+                    "battery_voltage",
+                    "  Voltage",
+                    f"{voltage / 1_000_000:.2f} V",
+                    tier=VOLATILE,
+                    key=f"{prefix}voltage",
+                )
+            )
+        # The rare device that does publish a rate gets the same three rows a
+        # laptop pack gets, because for that one the numbers are real.
+        if _reports_rate(path):
+            rows.extend(self._rate_rows(battery, voltage, status))
+        return rows
 
     def _battery_rows(self, battery) -> list:
         path = battery["path"]
@@ -332,10 +532,19 @@ class PowerProbe(Probe):
                 )
             )
 
-        # Every volatile row below is emitted on every pass, including when it
-        # has nothing to say. A row that disappears from sample() is simply not
-        # updated, and the widget keeps whatever it last said - so plugging the
-        # machine in would leave "About 2 hours left" on screen indefinitely.
+        rows.extend(self._rate_rows(battery, voltage, status))
+        return rows
+
+    def _rate_rows(self, battery, voltage, status) -> list:
+        """Draw, stored and time remaining: the three rows a rate feeds.
+
+        Every one of them is emitted on every pass, including when it has
+        nothing to say. A row that disappears from sample() is simply not
+        updated, and the widget keeps whatever it last said - so plugging the
+        machine in would leave "About 2 hours left" on screen indefinitely.
+        """
+        path = battery["path"]
+        prefix = battery["name"]
         power = read_int(path / "power_now")
         current = read_int(path / "current_now")
         if power is not None:
@@ -345,7 +554,7 @@ class PowerProbe(Probe):
             draw = f"{watts:.2f} W — worked out from current and voltage"
         else:
             draw = NOT_REPORTED
-        rows.append(
+        rows = [
             self.row(
                 "battery_draw",
                 "  Drawing",
@@ -353,7 +562,7 @@ class PowerProbe(Probe):
                 tier=VOLATILE,
                 key=f"{prefix}draw",
             )
-        )
+        ]
 
         now, _design, unit = _capacity_pair(path, use_now=True)
         rows.append(
@@ -398,25 +607,7 @@ class PowerProbe(Probe):
 
         for item in supplies:
             path = item["path"]
-            detail = [item["type"] or "Unknown type"]
-            online = read_int(path / "online")
-            if online is not None:
-                detail.append("connected" if online else "not connected")
-            status = read_first_line(path / "status")
-            if status:
-                detail.append(status.lower())
-            scope = read_first_line(path / "scope")
-            if scope:
-                detail.append(f"scope {scope.lower()}")
-            section.add(
-                self.row(
-                    "supply",
-                    item["name"],
-                    ", ".join(detail),
-                    tier=VOLATILE,
-                    key=f"supply{item['name']}",
-                )
-            )
+            section.add(self._supply_row(item))
             model = read_first_line(path / "model_name")
             if model:
                 section.add(
@@ -450,47 +641,83 @@ class PowerProbe(Probe):
         if overview:
             out["overview"] = overview
 
+        batteries, devices, _mains = self._sort(supplies)
         battery_rows = []
-        for battery in supplies:
-            if not battery["is_battery"]:
-                continue
+        for battery in batteries:
             if read_int(battery["path"] / "present") == 0:
                 continue
             battery_rows.extend(self._battery_volatile_rows(battery))
+        for battery in devices:
+            battery_rows.extend(self._device_volatile_rows(battery))
         if battery_rows:
             out["battery"] = battery_rows
 
-        supply_rows = []
-        for item in supplies:
-            path = item["path"]
-            detail = [item["type"] or "Unknown type"]
-            online = read_int(path / "online")
-            if online is not None:
-                detail.append("connected" if online else "not connected")
-            status = read_first_line(path / "status")
-            if status:
-                detail.append(status.lower())
-            scope = read_first_line(path / "scope")
-            if scope:
-                detail.append(f"scope {scope.lower()}")
-            supply_rows.append(
-                self.row(
-                    "supply",
-                    item["name"],
-                    ", ".join(detail),
-                    tier=VOLATILE,
-                    key=f"supply{item['name']}",
-                )
-            )
+        supply_rows = [self._supply_row(item) for item in supplies]
         if supply_rows:
             out["supplies"] = supply_rows
         return out
+
+    def _supply_row(self, item):
+        """One line per entry under /sys/class/power_supply, whatever it is."""
+        path = item["path"]
+        detail = [item["type"] or "Unknown type"]
+        online = read_int(path / "online")
+        if online is not None:
+            detail.append("connected" if online else "not connected")
+        status = read_first_line(path / "status")
+        if status:
+            detail.append(status.lower())
+        if item["is_peripheral"]:
+            detail.append("belongs to a device, not to the machine")
+        elif item["scope"]:
+            detail.append(f"scope {item['scope'].lower()}")
+        return self.row(
+            "supply",
+            item["name"],
+            ", ".join(detail),
+            tier=VOLATILE,
+            key=f"supply{item['name']}",
+        )
 
 
 _FAMILIES = (
     ("charge_now", "charge_full", "charge_full_design", "Ah"),
     ("energy_now", "energy_full", "energy_full_design", "Wh"),
 )
+
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    """``2, "mains input", "mains inputs"`` -> ``2 mains inputs``. Empty at zero.
+
+    Zero of something is left out rather than counted: the rows underneath say
+    what is absent in words, and "0 batteries, 1 on a peripheral, 0 mains
+    inputs" makes a reader work to find the one number that is not zero.
+    """
+    if not count:
+        return ""
+    return "{} {}".format(count, singular if count == 1 else plural)
+
+
+def _device_name(battery) -> str:
+    """What to call a peripheral battery.
+
+    `hidpp_battery_0` names a driver and an index. `MX Master 3S` names the
+    thing on the desk, and is what somebody opened this section to look for,
+    so the model name wins wherever the driver publishes one.
+    """
+    path = battery["path"]
+    return (
+        read_first_line(path / "model_name")
+        or read_first_line(path / "manufacturer")
+        or battery["name"]
+    )
+
+
+def _reports_rate(path) -> bool:
+    """Whether this battery publishes enough to work a rate or a total out of."""
+    return any(path_exists(path / name) for name in RATE_FILES) and any(
+        path_exists(path / name) for name in STORE_FILES
+    )
 
 
 def _capacity_pair(path, use_now: bool = False) -> tuple[int | None, int | None, str]:

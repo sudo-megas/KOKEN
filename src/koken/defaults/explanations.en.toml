@@ -278,6 +278,18 @@ Sustained use near total, with swap filling as well, is the point at which a
 machine starts to feel slow.
 """
 
+[hardware.memory.dimm_unknown]
+long = """
+The firmware wrote `Unknown` where this slot's size should be, so nothing is
+known about it either way.
+
+That is not the same as empty, which is why it does not say empty. Some boards
+report this for a slot they cannot read, some for a module they do not
+recognise, and some for every slot on a cold boot after a firmware update. If a
+slot you know is filled reads this, clearing CMOS or reseating the module
+usually restores it; if it persists, the module is not being trained.
+"""
+
 [hardware.memory.cached]
 short = "not lost, borrowed"
 long = """
@@ -1036,6 +1048,46 @@ problem rather than a wiring one.
 """
 
 # ---- Power ---------------------------------------------------------------
+
+[peripherals.power.battery_peripheral]
+short = "not the machine's own battery"
+long = """
+A battery inside something plugged into this machine - a wireless mouse, a
+keyboard, a game controller - rather than a battery powering the machine
+itself.
+
+The kernel publishes these through the same interface as a laptop pack, which
+is why they appear here at all. What they report is much thinner: usually a
+percentage and whether they are charging, and nothing else. There is no design
+capacity to compare against, so there is no wear figure, and no discharge rate,
+so there is no time estimate. That is the device being sparing, not a fault.
+
+A device is only listed if its driver publishes a battery. Plenty of wireless
+peripherals do not - most wireless headsets among them - and those cannot be
+shown here at all, because from the kernel's point of view they have no battery.
+"""
+
+[peripherals.power.battery_peripheral_present]
+long = """
+Which attached devices report a battery of their own.
+
+The name shown is whatever the driver publishes, which is often the product
+name and occasionally just the driver's own label. A device that is asleep or
+out of range may vanish from this list and come back, because the kernel stops
+publishing the battery when it cannot talk to the device.
+"""
+
+[peripherals.power.battery_peripheral_limits]
+long = """
+What this particular device is willing to say about its battery, spelled out so
+that the missing rows are not mistaken for a failure to read them.
+
+Most peripheral batteries report a charge percentage and a state and stop
+there. Some report only a coarse level - Full, Low, Critical - because their
+controller has no better gauge. The rows that would need a design capacity or a
+discharge rate are left out rather than filled with dashes, since a dash reads
+as "could not be read" when the truth is "was never offered".
+"""
 
 [peripherals.power.battery_health]
 long = """
